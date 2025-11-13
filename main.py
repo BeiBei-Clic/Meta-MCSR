@@ -27,7 +27,7 @@ def main():
     y = X[:, 0] + 2 * X[:, 1] * np.sin(X[:, 0]) + 0.5 * X[:, 2]**2 + np.random.normal(0, 0.1, n_samples)
     
     # 创建并训练模型
-    model = MCTSSymbolicRegression(max_depth=5, max_iterations=1000, max_vars=5)
+    model = MCTSSymbolicRegression(max_depth=10, max_iterations=1000, max_vars=5)
     
     print("开始训练...")
     best_expr = model.fit(X, y)

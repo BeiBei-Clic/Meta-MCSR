@@ -41,8 +41,8 @@ class Node:
 class MCTSSymbolicRegression:
     def __init__(self, max_depth=10, max_iterations=1000, max_vars=5, eta=0.999):
         self.max_vars = max_vars
-        self.binary_ops = [nd.Add, nd.Sub, nd.Mul, nd.Div, nd.Max, nd.Min]
-        self.unary_ops = [nd.Sin, nd.Cos, nd.Sqrt, nd.Log, nd.Neg, nd.Abs, nd.Tan, nd.Exp]
+        self.binary_ops = [nd.Add, nd.Sub, nd.Mul, nd.Div]
+        self.unary_ops = [nd.Sin, nd.Cos, nd.Sqrt, nd.Log, nd.Exp]
         self.constants = [nd.Number(1), nd.Number(2), nd.Number(0.5)]
         self.max_depth = max_depth
         self.max_iterations = max_iterations

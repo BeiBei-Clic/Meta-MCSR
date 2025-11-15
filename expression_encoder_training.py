@@ -103,11 +103,11 @@ class MaskedLanguageModel(nn.Module):
         
     def forward(self, token_ids, attention_mask=None, masked_indices=None):
         """前向传播"""
-        # 获取嵌入
-        embeddings = self.encoder(token_ids, attention_mask)
+        # 获取序列级别的嵌入
+        sequence_embeddings = self.encoder(token_ids, attention_mask, return_sequence=True)
         
         # 应用MLM头部
-        predictions = self.mlm_head(embeddings)
+        predictions = self.mlm_head(sequence_embeddings)
         
         if masked_indices is not None:
             # 只返回masked位置的预测
@@ -167,6 +167,9 @@ class ExpressionPreTrainer:
         masked_indices = []
         attention_masks = []
         
+        # 找到批次中最长的序列长度
+        max_seq_len = max(len(ids) for ids in token_ids_list)
+        
         for batch_idx, token_ids in enumerate(token_ids_list):
             masked_batch = token_ids.copy()
             
@@ -190,12 +193,14 @@ class ExpressionPreTrainer:
                     rand = random.random()
                     if rand < 0.8:
                         masked_batch[pos] = self.tokenizer.token_to_id['<MASK>']
-                        # 记录被掩码的位置
-                        masked_indices.append((batch_idx, pos))
+                        # 记录被掩码的位置（确保位置在有效范围内）
+                        if pos < max_seq_len:  # 确保位置不超过批次中最长序列长度
+                            masked_indices.append((batch_idx, pos))
                     elif rand < 0.9:
                         masked_batch[pos] = random.randint(1, self.tokenizer.vocab_size - 4)  # 排除特殊token
-                        # 记录被掩码的位置
-                        masked_indices.append((batch_idx, pos))
+                        # 记录被掩码的位置（确保位置在有效范围内）
+                        if pos < max_seq_len:  # 确保位置不超过批次中最长序列长度
+                            masked_indices.append((batch_idx, pos))
                     # else: 保持不变，不记录
             
             masked_token_ids.append(masked_batch)
@@ -238,12 +243,6 @@ class ExpressionPreTrainer:
                 batch_indices = [idx[0] for idx in masked_indices]
                 pos_indices = [idx[1] for idx in masked_indices]
                 
-                # 确保位置索引不超过序列长度
-                max_pos = max(pos_indices)
-                if max_pos >= outputs.size(1):
-                    print(f"警告: 位置索引 {max_pos} 超出序列长度 {outputs.size(1)}")
-                    continue
-                
                 # 提取被掩码位置的预测结果
                 masked_outputs = outputs[batch_indices, pos_indices]
                 masked_input_ids = torch.tensor([token_ids_list[idx[0]][idx[1]] for idx in masked_indices], device=self.device)
@@ -269,6 +268,7 @@ class ExpressionPreTrainer:
         """验证模型"""
         self.mlm_model.eval()
         total_loss = 0
+        valid_batches = 0
         
         with torch.no_grad():
             for i in range(0, len(expressions), self.batch_size):
@@ -296,8 +296,9 @@ class ExpressionPreTrainer:
                     
                     loss = self.criterion(masked_outputs, masked_input_ids)
                     total_loss += loss.item()
+                    valid_batches += 1
         
-        return total_loss / (len(expressions) // self.batch_size)
+        return total_loss / valid_batches if valid_batches > 0 else 0
     
     def train(self, train_expressions, val_expressions=None, num_epochs=50, save_path='weights/expression_encoder'):
         """训练模型"""

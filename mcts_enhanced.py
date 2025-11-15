@@ -95,7 +95,7 @@ class MCTSWithRewardNetwork:
             try:
                 # 使用真实表达式作为目标
                 oracle_embedding = self.reward_network.expression_embedding.encode_expressions([str(true_expression)])
-                self.oracle_target = torch.FloatTensor(oracle_embedding)
+                self.oracle_target = torch.FloatTensor(oracle_embedding).to(self.reward_network.expression_embedding.device)
                 # 确保是2D张量
                 if self.oracle_target.dim() == 1:
                     self.oracle_target = self.oracle_target.unsqueeze(0)
@@ -107,13 +107,29 @@ class MCTSWithRewardNetwork:
         
         print(f"设置神谕目标: {true_expression}")
     
-    def compute_hybrid_reward(self, expression_str, r2_score, complexity):
-        """计算混合奖励（双网络协作）"""
-        # 性能分量（来自奖励网络的潜力预测）
-        r2_clipped = max(0, min(1, r2_score))  # 限制在[0,1]范围
-        z_perf = 1.0 / (1.0 + np.exp(-10 * (r2_clipped - 0.5)))  # Sigmoid函数
+    
+    
+    def compute_hybrid_reward(self, expression_str, r2_score=None, complexity=None):
+        """计算混合奖励（基于训练好的网络预测）"""
+        # 1. 潜力预测分量：使用奖励网络预测表达式的最终性能
+        if self.reward_network is not None and self.training_data is not None:
+            try:
+                # 使用奖励网络直接预测潜力
+                potential_reward = self.evaluate_with_reward_network(expression_str)
+                # 确保奖励在[0,1]范围
+                z_perf = max(0, min(1, float(potential_reward)))
+            except Exception as e:
+                print(f"潜力预测失败: {e}")
+                z_perf = 0.0
+        else:
+            # 如果没有奖励网络，使用R2分数（仅作fallback）
+            if r2_score is not None:
+                r2_clipped = max(0, min(1, r2_score))
+                z_perf = r2_clipped
+            else:
+                z_perf = 0.0
         
-        # 结构分量（表达式嵌入与真实解的相似度）
+        # 2. 结构相似度分量：基于表达式编码器的余弦相似度
         if self.oracle_target is not None and self.reward_network is not None:
             self.reward_network.eval()
             with torch.no_grad():
@@ -134,19 +150,16 @@ class MCTSWithRewardNetwork:
                     z_struct = torch.cosine_similarity(expr_tensor, oracle_target).item()
                     
                     # 确保相似度在[0,1]范围
-                    z_struct = (z_struct + 1) / 2  # 从[-1,1]映射到[0,1]
+                    z_struct = max(0, min(1, (z_struct + 1) / 2))  # 从[-1,1]映射到[0,1]
                     
                 except Exception as e:
-                    # 如果计算失败，使用复杂度惩罚
-                    complexity_penalty = np.exp(-complexity / 100)
-                    z_struct = complexity_penalty
+                    print(f"结构相似度计算失败: {e}")
+                    z_struct = 0.0
         else:
-            # 如果没有神谕目标，使用复杂度惩罚作为结构奖励
-            complexity_penalty = np.exp(-complexity / 100)  # 复杂度越高奖励越低
-            z_struct = complexity_penalty
+            # 如果没有神谕目标，结构奖励设为中等值
+            z_struct = 0.5
         
-        # 混合奖励：β * R_pot + (1-β) * S_struct
-        # 使用超参数beta（在初始化时设置，默认0.7）
+        # 3. 混合奖励：β * R_pot + (1-β) * S_struct
         z_hybrid = self.alpha_hybrid * z_perf + (1 - self.alpha_hybrid) * z_struct
         
         return z_hybrid, z_perf, z_struct
@@ -206,7 +219,7 @@ class MCTSWithRewardNetwork:
             print(f"奖励网络评估失败: {e}")
             return 0.0
     
-    def add_experience(self, expression_str, r2_score, complexity, hybrid_reward):
+    def add_experience(self, expression_str, r2_score, complexity=None, hybrid_reward=None):
         """添加经验到回放池"""
         if self.training_data is None:
             return
@@ -394,7 +407,7 @@ class MCTSWithRewardNetwork:
         return random.choice(node.children)
     
     def _mutate_eqtrees(self, eqtrees):
-        """变异表达式树"""
+        """变异表达式树（恢复原始多样化的变异策略）"""
         mutation_type = random.choice(['add', 'replace', 'modify'])
         
         if mutation_type == 'add' and len(eqtrees) < self.max_vars:
@@ -516,58 +529,52 @@ class MCTSWithRewardNetwork:
                 y_pred = Z @ A
                 node.r2 = R2_score(y, y_pred)
 
-            # 构建最终表达式
+            # 构建最终表达式，确保每个子表达式都是唯一的
             node.phi = nd.Number(A[0]) if abs(A[0]) > 1e-6 else None
             for a, eqtree in zip(A[1:], node.eqtrees):
                 if abs(a) < 1e-6:
                     continue
-                elif abs(a - 1.0) < 1e-6:
+                # 确保eqtree是唯一副本，避免子表达式警告
+                eqtree_unique = self._ensure_unique_expressions(eqtree)
+                
+                if abs(a - 1.0) < 1e-6:
                     if node.phi is None:
-                        node.phi = eqtree
+                        node.phi = eqtree_unique
                     else:
-                        node.phi = node.phi + eqtree
+                        node.phi = node.phi + eqtree_unique
                 elif abs(a + 1.0) < 1e-6:
                     if node.phi is None:
-                        node.phi = -eqtree
+                        node.phi = -eqtree_unique
                     else:
-                        node.phi = node.phi - eqtree
+                        node.phi = node.phi - eqtree_unique
                 else:
                     if node.phi is None:
-                        node.phi = nd.Number(a) * eqtree
+                        node.phi = nd.Number(a) * eqtree_unique
                     else:
-                        node.phi = node.phi + nd.Number(a) * eqtree
+                        node.phi = node.phi + nd.Number(a) * eqtree_unique
                         
             if node.phi is None:
                 node.phi = nd.Number(0.0)
-                
-            node.complexity = len(str(node.phi))
             
-            # 计算混合奖励
+            # 计算混合奖励（完全基于网络预测）
             if node.phi is not None:
                 expression_str = str(node.phi)
                 z_hybrid, z_perf, z_struct = self.compute_hybrid_reward(
-                    expression_str, node.r2, node.complexity
+                    expression_str, node.r2, None  # 不再传递复杂度
                 )
                 node.reward = z_hybrid
+                node.reward_network_reward = z_perf  # 存储潜力预测作为网络奖励
                 
                 # 使用奖励网络评估
                 if self.reward_network is not None:
                     try:
-                        node.reward_network_reward = self.evaluate_with_reward_network(expression_str)
+                        node_network_reward = self.evaluate_with_reward_network(expression_str)
                         # 添加经验到回放池 - 确保只有有效的经验才被添加
                         if node.r2 > -np.inf and not np.isnan(z_hybrid) and np.isfinite(z_hybrid):
-                            self.add_experience(expression_str, node.r2, node.complexity, z_hybrid)
+                            self.add_experience(expression_str, node.r2, None, z_hybrid)
                     except Exception as e:
-                        # 不打印错误，避免过多输出
-                        node.reward_network_reward = 0
-                        # 即使奖励网络评估失败，也添加基础经验
-                        if node.r2 > -np.inf and not np.isnan(z_hybrid) and np.isfinite(z_hybrid):
-                            self.add_experience(expression_str, node.r2, node.complexity, z_hybrid)
-                else:
-                    node.reward_network_reward = 0
-                    # 即使没有奖励网络，也添加基础经验
-                    if node.r2 > -np.inf and not np.isnan(z_hybrid) and np.isfinite(z_hybrid):
-                        self.add_experience(expression_str, node.r2, node.complexity, z_hybrid)
+                        # 即使奖励网络评估失败，也继续使用计算出的奖励
+                        pass
             else:
                 node.reward = 0
                 node.reward_network_reward = 0
@@ -575,11 +582,18 @@ class MCTSWithRewardNetwork:
         except Exception as e:
             # 不打印错误，避免过多输出
             node.r2 = -np.inf
-            node.complexity = float('inf')
             node.reward = 0
             node.reward_network_reward = 0
             node.phi = nd.Number(0.0)
     
+    def _ensure_unique_expressions(self, expr):
+        """确保表达式树中每个子表达式都是唯一对象，避免子表达式警告"""
+        if expr is None:
+            return None
+            
+        # 为确保唯一性，始终创建深度复制
+        return copy.deepcopy(expr)
+
     def _evaluate_expression(self, expr, X):
         """评估单个表达式"""
         try:

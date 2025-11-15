@@ -19,7 +19,7 @@ from mcts_enhanced import MCTSWithRewardNetwork
 class DataGenerator:
     """数据生成器，生成用于奖励网络训练的数据集"""
     
-    def __init__(self, n_samples=1000, n_features=3, noise_level=0.1):
+    def __init__(self, n_samples=100, n_features=3, noise_level=0.1):  # 进一步减小样本数量从200到100
         self.n_samples = n_samples
         self.n_features = n_features
         self.noise_level = noise_level
@@ -99,11 +99,11 @@ class DataGenerator:
         return datasets
 
 
-class RewardNetworkTrainer:
-    """增强的奖励网络训练器，支持MCTS数据生成和嵌入器微调"""
+class RewardNetworkTrainingManager:
+    """增强的奖励网络训练管理器，支持MCTS数据生成和嵌入器微调"""
     
-    def __init__(self, expression_encoder_path, max_epochs=100, batch_size=64, 
-                 learning_rate=1e-4, mcts_iterations=200, experience_buffer_size=10000):
+    def __init__(self, expression_encoder_path, max_epochs=5, batch_size=16,  # 进一步减小训练轮次和批次大小
+                 learning_rate=1e-4, mcts_iterations=20, experience_buffer_size=1000):  # 进一步减小MCTS迭代次数和经验池大小
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.max_epochs = max_epochs
         self.batch_size = batch_size
@@ -146,38 +146,33 @@ class RewardNetworkTrainer:
         
         print(f"奖励网络已初始化，设备: {self.device}")
     
-    def generate_training_data_with_mcts(self, datasets, num_epochs_per_dataset=3):
-        """使用MCTS为每个数据集生成训练数据"""
-        print("开始使用MCTS生成训练数据...")
+    def generate_training_data_with_mcts(self, datasets, num_epochs_per_dataset=2):
+        """使用MCTS生成训练数据"""
+        print("使用MCTS生成训练数据...")
         
         for dataset_idx, dataset in enumerate(datasets):
             print(f"\n处理数据集 {dataset_idx + 1}/{len(datasets)}")
-            print(f"真实表达式: {dataset['true_expression']}")
             
-            X, y = dataset['X'], dataset['y']
-            true_expr = dataset['true_expression']
+            X = dataset['X']
+            y = dataset['y']
             
-            # 创建MCTS实例
+            # 创建增强MCTS实例，使用更小的超参数
             mcts = MCTSWithRewardNetwork(
-                max_depth=8,
-                max_iterations=self.mcts_iterations,
-                max_vars=3,
-                eta=0.999,
+                max_depth=3,  # 减小最大深度
+                max_iterations=5,  # 大幅减少迭代次数
+                max_vars=min(3, X.shape[1]),  # 限制变量数量
                 reward_network=self.reward_network,
                 experience_buffer=self.experience_buffer,
                 alpha_hybrid=0.7
             )
             
-            # 设置训练数据和神谕目标
-            mcts.set_training_data(X, y)
-            
-            # 将真实表达式转换为nd2py格式
+            # 设置神谕目标
             try:
-                # 简化处理：直接使用字符串
-                mcts.set_oracle_target(str(true_expr))
-            except:
-                print(f"警告：无法设置神谕目标，跳过此数据集")
-                continue
+                if self.reward_network is not None:
+                    mcts.set_oracle_target(dataset['true_expression'])
+            except Exception as e:
+                print(f"警告：无法设置神谕目标: {e}")
+                # 即使没有神谕目标，也继续运行
             
             # 运行MCTS多次以收集经验
             for epoch in range(num_epochs_per_dataset):
@@ -203,12 +198,14 @@ class RewardNetworkTrainer:
         """训练奖励网络"""
         print("\n开始训练奖励网络...")
         
+        
+        
         if len(self.experience_buffer) == 0:
             print("错误：经验池为空，无法训练")
             return
         
         best_val_loss = float('inf')
-        patience = 10
+        patience = 3  # 减小早停耐心值
         patience_counter = 0
         
         for epoch in range(self.max_epochs):
@@ -284,7 +281,31 @@ class RewardNetworkTrainer:
             scores = []
             for expr in candidate_expressions:
                 try:
-                    reward = self.reward_network.predict_reward(expr, torch.FloatTensor(X))
+                    # 确保X是2D张量
+                    X_tensor = torch.FloatTensor(X)
+                    if X_tensor.dim() == 1:
+                        X_tensor = X_tensor.unsqueeze(-1)
+                    elif X_tensor.dim() > 2:
+                        X_tensor = X_tensor.view(X_tensor.size(0), -1)
+                    
+                    # 创建一个代表性的数据样本（与训练时保持一致）
+                    if X_tensor.numel() > 100:  # 如果数据太大，使用统计特征
+                        X_repr = torch.tensor([
+                            X_tensor.mean().item(),
+                            X_tensor.std().item() if X_tensor.numel() > 1 else 0.0,
+                            X_tensor.min().item(),
+                            X_tensor.max().item()
+                        ], dtype=torch.float32).unsqueeze(0)  # (1, 4)
+                    else:
+                        # 如果数据小，填充到4维
+                        if X_tensor.shape[1] < 4:
+                            padding = torch.zeros(X_tensor.shape[0], 4 - X_tensor.shape[1])
+                            X_repr = torch.cat([X_tensor, padding], dim=1)
+                        else:
+                            X_repr = X_tensor[:, :4]  # 取前4个特征
+                        X_repr = X_repr[:1]  # 只取第一个样本
+                        
+                    reward = self.reward_network.predict_reward(expr, X_repr)
                     
                     # 计算R2分数作为参考
                     # 这里简化处理，实际应该评估真正的性能
@@ -380,27 +401,26 @@ def main():
         return
     
     # 创建数据生成器
-    data_generator = DataGenerator(n_samples=500, n_features=3, noise_level=0.1)
+    data_generator = DataGenerator(n_samples=100, n_features=3, noise_level=0.1)
     
     print("生成数据集...")
     datasets = data_generator.create_dataset()
     
-    # 分割训练和测试数据
-    train_size = int(len(datasets) * 0.8)
-    train_datasets = datasets[:train_size]
-    test_datasets = datasets[train_size:]
+    # 减少数据集数量，只使用前4个数据集进行训练
+    train_datasets = datasets[:4]
+    test_datasets = datasets[4:6]  # 使用2个数据集作为测试集
     
     print(f"训练数据集: {len(train_datasets)}")
     print(f"测试数据集: {len(test_datasets)}")
     
-    # 创建训练器
-    trainer = RewardNetworkTrainer(
+    # 创建训练管理器，使用更小的超参数
+    trainer = RewardNetworkTrainingManager(
         expression_encoder_path=expr_encoder_path,
-        max_epochs=50,
-        batch_size=32,
+        max_epochs=5,  # 减少训练轮数
+        batch_size=16,  # 减小批次大小
         learning_rate=1e-4,
-        mcts_iterations=100,  # 减少迭代次数以加快训练
-        experience_buffer_size=5000
+        mcts_iterations=10,  # 大幅减少MCTS迭代次数
+        experience_buffer_size=500  # 减小经验缓冲区大小
     )
     
     # 运行完整训练流程

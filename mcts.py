@@ -42,12 +42,12 @@ class EnhancedNode:
         return self.value / self.visits + c * np.sqrt(np.log(self.parent.visits + 1) / (self.visits + 1))
 
 
-class MCTSWithRewardNetwork:
-    """使用奖励网络的增强MCTS符号回归"""
+class MCTS:
+    """蒙特卡洛树搜索符号回归，支持传统方法和奖励网络方法"""
     
     def __init__(self, max_depth=10, max_iterations=1000, max_vars=5, 
                  eta=0.999, reward_network=None, experience_buffer=None,
-                 alpha_hybrid=0.7):
+                 alpha_hybrid=0.7, use_reward_network=False):
         self.max_vars = max_vars
         self.binary_ops = [nd.Add, nd.Sub, nd.Mul, nd.Div]
         self.unary_ops = [nd.Sin, nd.Cos, nd.Sqrt, nd.Log, nd.Exp]
@@ -59,6 +59,7 @@ class MCTSWithRewardNetwork:
         self.variables = []
         self.eta = eta  # 复杂度惩罚系数
         self.alpha_hybrid = alpha_hybrid  # 混合奖励中的性能权重
+        self.use_reward_network = use_reward_network  # 是否使用奖励网络
         
         # 奖励网络相关
         self.reward_network = reward_network
@@ -109,8 +110,37 @@ class MCTSWithRewardNetwork:
     
     
     
+    def compute_traditional_reward(self, r2_score, complexity=None):
+        """计算传统蒙特卡洛树搜索的奖励"""
+        if r2_score is None or r2_score == -np.inf:
+            return 0.0, 0.0, 0.0
+        
+        # 确保R2分数在有效范围内
+        r2_clipped = max(-1.0, min(1.0, r2_score))
+        
+        # 将R2分数转换为[0,1]范围的奖励
+        # R2 = -1 对应0，R2 = 1 对应1
+        performance_reward = (r2_clipped + 1) / 2
+        
+        # 如果有复杂度信息，应用复杂度惩罚
+        if complexity is not None and complexity > 0:
+            # 复杂度惩罚，较简单的表达式获得更高奖励
+            complexity_penalty = 1.0 / (1.0 + complexity * 0.01)
+        else:
+            complexity_penalty = 1.0
+        
+        # 综合奖励：性能奖励 * 复杂度惩罚
+        total_reward = performance_reward * complexity_penalty
+        
+        return total_reward, performance_reward, complexity_penalty
+    
     def compute_hybrid_reward(self, expression_str, r2_score=None, complexity=None):
-        """计算混合奖励（基于训练好的网络预测）"""
+        """计算混合奖励（支持传统方法和奖励网络方法）"""
+        if not self.use_reward_network or self.reward_network is None:
+            # 使用传统的奖励计算方法
+            return self.compute_traditional_reward(r2_score, complexity)
+        
+        # 以下是原有的基于奖励网络的计算方法
         # 1. 潜力预测分量：使用奖励网络预测表达式的最终性能
         if self.reward_network is not None and self.training_data is not None:
             try:
@@ -556,17 +586,17 @@ class MCTSWithRewardNetwork:
             if node.phi is None:
                 node.phi = nd.Number(0.0)
             
-            # 计算混合奖励（完全基于网络预测）
+            # 计算奖励（根据use_reward_network参数选择方法）
             if node.phi is not None:
                 expression_str = str(node.phi)
                 z_hybrid, z_perf, z_struct = self.compute_hybrid_reward(
-                    expression_str, node.r2, None  # 不再传递复杂度
+                    expression_str, node.r2, None
                 )
                 node.reward = z_hybrid
-                node.reward_network_reward = z_perf  # 存储潜力预测作为网络奖励
+                node.reward_network_reward = z_perf  # 存储性能预测作为网络奖励
                 
-                # 使用奖励网络评估
-                if self.reward_network is not None:
+                # 只有在使用奖励网络时才添加经验到回放池
+                if self.use_reward_network and self.reward_network is not None:
                     try:
                         node_network_reward = self.evaluate_with_reward_network(expression_str)
                         # 添加经验到回放池 - 确保只有有效的经验才被添加
@@ -626,7 +656,7 @@ class MCTSWithRewardNetwork:
 
 if __name__ == "__main__":
     # 测试代码
-    print("测试增强MCTS...")
+    print("测试蒙特卡洛树搜索...")
     
     # 创建测试数据
     np.random.seed(42)
@@ -634,15 +664,32 @@ if __name__ == "__main__":
     X = np.random.uniform(-5, 5, (n_samples, 2))
     y = X[:, 0] + 2 * X[:, 1] + np.random.normal(0, 0.1, n_samples)
     
-    # 创建增强MCTS
-    mcts = MCTSWithRewardNetwork(max_depth=5, max_iterations=100)
+    # 测试传统MCTS（不使用奖励网络）
+    print("\n=== 测试传统MCTS ===")
+    mcts_traditional = MCTS(max_depth=5, max_iterations=100, use_reward_network=False)
     
-    print("开始训练...")
-    best_expr = mcts.fit(X, y)
+    print("开始训练（传统方法）...")
+    best_expr = mcts_traditional.fit(X, y)
     print(f"最佳表达式: {best_expr}")
     
     # 评估
-    r2, rmse = mcts.get_score(X, y)
+    r2, rmse = mcts_traditional.get_score(X, y)
     print(f"R2: {r2:.4f}, RMSE: {rmse:.4f}")
     
+    # 测试增强MCTS（使用奖励网络）
+    print("\n=== 测试增强MCTS（使用奖励网络） ===")
+    mcts_enhanced = MCTS(max_depth=5, max_iterations=100, use_reward_network=True)
+    
+    print("开始训练（增强方法）...")
+    best_expr_enhanced = mcts_enhanced.fit(X, y)
+    print(f"最佳表达式: {best_expr_enhanced}")
+    
+    # 评估
+    r2_enhanced, rmse_enhanced = mcts_enhanced.get_score(X, y)
+    print(f"R2: {r2_enhanced:.4f}, RMSE: {rmse_enhanced:.4f}")
+    
     print("测试完成!")
+
+
+# 向后兼容性别名
+MCTSWithRewardNetwork = MCTS

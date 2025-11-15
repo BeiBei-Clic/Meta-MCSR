@@ -16,7 +16,7 @@ sys.path.append(os.path.join(os.path.dirname(__file__), 'nd2py_package'))
 import nd2py as nd
 from nd2py.utils import R2_score, RMSE_score
 
-from mcts_enhanced import MCTSWithRewardNetwork
+from mcts import MCTSWithRewardNetwork
 from reward_network import RewardNetwork
 
 

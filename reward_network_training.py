@@ -13,7 +13,7 @@ import nd2py as nd
 from nd2py.utils import R2_score
 from expression_encoder import ExpressionEmbedding
 from reward_network import RewardNetwork, ExperienceReplayBuffer, RewardNetworkTrainer
-from mcts_enhanced import MCTSWithRewardNetwork
+from mcts import MCTSWithRewardNetwork
 
 
 class DataGenerator:

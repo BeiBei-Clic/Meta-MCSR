@@ -4,6 +4,13 @@ import sys
 import os
 import time
 
+# 屏蔽PyTorch嵌套张量警告
+import warnings
+warnings.filterwarnings("ignore", category=UserWarning, 
+                       message=".*nested tensors.*")
+warnings.filterwarnings("ignore", category=UserWarning,
+                       message=".*layout=torch.jagged.*")
+
 # 添加nd2py包路径
 sys.path.append(os.path.join(os.path.dirname(__file__), 'nd2py_package'))
 import nd2py as nd

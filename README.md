@@ -4,21 +4,23 @@
 
 ## 快速开始
 
-Meta-MCSR系统包含4个主要训练和使用阶段：
+Meta-MCSR系统包含4个主要阶段：
 
-1. **表达式编码器预训练** - 学习数学表达式结构特征
-2. **表达式编码器推理** - 使用训练好的编码器
-3. **奖励网络训练** - 训练奖励网络和微调编码器  
-4. **完整系统运行** - 运行融合的MCTS符号回归
+1. **表达式编码器预训练** - 学习数学表达式结构特征（一次性）
+2. **奖励网络训练** - 训练奖励网络并微调编码器（一次性）  
+3. **直接运行符号回归** - 使用预训练模型进行推理（可重复使用）
+4. **测试编码器功能** - 验证和演示编码器功能
 
 ## 系统流程
 
 ```
-步骤1: 预训练表达式编码器
+步骤1: 预训练表达式编码器           ← 一次性
     ↓
-步骤2: 训练奖励网络（含编码器微调）
+步骤2: 训练奖励网络                 ← 一次性
     ↓  
-步骤3: 使用完整系统进行符号回归
+步骤3: 推理阶段                    ← 可重复使用
+    ├── 运行完整系统进行符号回归
+    └── 测试编码器功能
 ```
 
 ---
@@ -54,18 +56,135 @@ weights/expression_encoder/
 - 批次大小：64
 - 训练轮数：30
 
+**重要提示：** 这是预训练阶段，只执行一次，后续推理阶段会直接使用生成的模型文件。
+
 ---
 
-## 2. 表达式编码器推理（预测）
+## 2. 奖励网络训练
 
-### 2.1 基础用法
+### 2.1 训练奖励网络
+
+**命令：**
+```bash
+python reward_network_training.py
+```
+
+**功能：**
+- 生成多个符号回归数据集
+- 使用MCTS生成训练经验
+- 训练奖励网络并微调表达式编码器
+- 保存最终模型到 `weights/reward_network_final/`
+
+**训练时间：** 约1小时（GPU）或3小时（CPU）
+
+**输出文件：**
+```
+weights/reward_network_final/
+├── expr_encoder_model.pth           # 微调后的表达式编码器权重
+├── reward_network.pth               # 训练好的奖励网络权重
+├── tokenizer.pkl                    # 分词器配置
+└── training_history.pkl             # 训练历史记录
+```
+
+**参数说明：**
+此脚本也使用固定参数，包括：
+- 奖励网络学习率：1e-4
+- 表达式编码器微调学习率：1e-5
+- 批次大小：16
+- 经验池大小：500
+- 混合权重：70%性能奖励 + 30%结构奖励
+
+**重要提示：**
+- 必须先完成步骤1（表达式编码器预训练）
+- 这是预训练阶段，只执行一次
+- 训练过程会自动微调已预训练的表达式编码器
+
+---
+
+## 3. 直接运行符号回归（推理阶段）
+
+### 3.1 运行完整系统
+
+**命令：**
+```bash
+python mcts_with_reward_network.py
+```
+
+**功能：**
+- 自动检查并加载预训练模型
+- 在预定义的符号回归问题上运行
+- 显示搜索结果和性能对比
+- 使用混合奖励（性能奖励 + 结构奖励）
+
+**推理流程：**
+1. **检查模型文件** - 如果存在预训练模型就加载，否则警告
+2. **生成测试数据** - 使用预定义的线性函数问题
+3. **运行MCTS搜索** - 使用训练好的奖励网络指导搜索
+4. **显示结果** - 找到的表达式、R²分数、运行时间等
+
+**输出示例：**
+```
+基于自学习奖励网络的MCTS符号回归系统
+============================================================
+加载表达式嵌入器: weights/expression_encoder
+加载奖励网络: weights/reward_network_final
+
+问题: 简单线性函数
+描述: y = x1 + 2*x2 + 噪声
+真实解: x1 + 2*x2
+============================================================
+
+使用增强MCTS（奖励网络）
+------------------------------
+找到的解: x1 + 2*x2
+R2: 0.9985
+RMSE: 0.0324
+训练时间: 12.45s
+```
+
+**重要特点：**
+- **推理模式** - 不进行任何训练，直接使用预训练模型
+- **可重复使用** - 每次运行都使用相同的预训练模型
+- **自动降级** - 如果没有预训练模型，会自动使用基础MCTS（基于R²分数）
+
+### 3.2 高级使用
+
+如果您想运行不同的符号回归问题，可以修改 `mcts_with_reward_network.py` 中的问题定义部分，或者创建一个自定义脚本加载预训练模型：
+
+```python
+from mcts_with_reward_network import load_trained_models, run_symbolic_regression
+import numpy as np
+
+# 加载预训练模型
+models = load_trained_models()
+
+# 自定义数据
+X = np.random.uniform(-5, 5, (100, 3))
+y = X[:, 0] + 2 * X[:, 1] * np.sin(X[:, 0]) + 0.5 * X[:, 2]**2
+
+# 运行符号回归
+result = run_symbolic_regression(
+    X, y, 
+    true_expression="x1 + 2*x2*sin(x1) + 0.5*x3^2",
+    models=models
+)
+
+print(f"找到的解: {result['best_expression']}")
+print(f"R²分数: {result['r2_score']:.4f}")
+```
+
+---
+
+## 4. 测试编码器功能
+
+### 4.1 编码器推理工具
 
 **命令：**
 ```bash
 python expression_encoder_inference.py [模式] [参数...]
 ```
 
-### 2.2 各种使用模式
+### 4.2 各种使用模式
 
 #### 演示模式
 ```bash
@@ -107,7 +226,7 @@ python expression_encoder_inference.py analyze "log(x1) + exp(x2)"
 ```
 **功能：** 分析表达式的复杂度、函数类型、变量数量等特征
 
-### 2.3 使用示例
+### 4.3 使用示例
 
 ```bash
 # 演示基本功能
@@ -128,155 +247,9 @@ python expression_encoder_inference.py analyze "log(x1) * sin(x2) + exp(x3)"
 
 ---
 
-## 3. 奖励网络训练
-
-### 3.1 训练奖励网络
-
-**命令：**
-```bash
-python reward_network_training.py
-```
-
-**功能：**
-- 生成多个符号回归数据集
-- 使用MCTS生成训练经验
-- 训练奖励网络并微调表达式编码器
-- 保存最终模型到 `weights/reward_network_final/`
-
-**训练时间：** 约1小时（GPU）或3小时（CPU）
-
-**输出文件：**
-```
-weights/reward_network_final/
-├── expr_encoder_model.pth           # 微调后的表达式编码器权重
-├── reward_network.pth               # 训练好的奖励网络权重
-├── tokenizer.pkl                    # 分词器配置
-└── training_history.pkl             # 训练历史记录
-```
-
-**参数说明：**
-此脚本也使用固定参数，包括：
-- 奖励网络学习率：1e-4
-- 表达式编码器微调学习率：1e-5
-- 批次大小：16
-- 经验池大小：500
-- 混合权重：70%性能奖励 + 30%结构奖励
-
-**重要提示：**
-- 必须先完成步骤1（表达式编码器预训练）
-- 训练过程会自动微调已预训练的表达式编码器
-
----
-
-## 4. 完整系统运行符号回归
-
-### 4.1 运行完整系统
-
-**命令：**
-```bash
-python mcts_with_reward_network.py [模式选项]
-```
-
-### 4.2 各种运行模式
-
-#### 交互模式
-```bash
-python mcts_with_reward_network.py --mode interactive
-```
-**功能：** 进入交互模式，可以自定义数据集和参数
-
-#### 基准测试模式
-```bash
-python mcts_with_reward_network.py --mode benchmark
-```
-**功能：** 运行预定义的基准测试集，评估系统性能
-
-#### 单次运行模式
-```bash
-python mcts_with_reward_network.py --mode single --problem 1
-python mcts_with_reward_network.py --mode single --problem 2
-```
-**功能：** 运行单个预定义问题
-
-#### 自定义数据模式
-```bash
-python mcts_with_reward_network.py --mode custom --data custom_data.csv --output result.txt
-```
-**功能：** 使用自定义数据文件进行符号回归
-
-### 4.3 高级参数选项
-
-#### 搜索深度设置
-```bash
-python mcts_with_reward_network.py --mode single --problem 1 --depth 10
-```
-**说明：** 设置最大搜索深度为10层（默认8层）
-
-#### 迭代次数设置
-```bash
-python mcts_with_reward_network.py --mode single --problem 1 --iterations 1000
-```
-**说明：** 设置MCTS迭代次数为1000次（默认500次）
-
-#### 混合权重调整
-```bash
-python mcts_with_reward_network.py --mode single --problem 1 --alpha 0.8
-```
-**说明：** 设置性能奖励权重为0.8（默认0.7，范围0-1）
-
-#### 变量数量限制
-```bash
-python mcts_with_reward_network.py --mode single --problem 1 --max-vars 5
-```
-**说明：** 限制表达式最多使用5个变量（默认3个）
-
-#### 真实表达式设置（可选）
-```bash
-python mcts_with_reward_network.py --mode single --problem 1 --oracle "x1 + 2*x2*sin(x1)"
-```
-**说明：** 提供真实表达式作为参考，提升搜索精度
-
-### 4.4 组合使用示例
-
-```bash
-# 使用默认参数运行基准测试
-python mcts_with_reward_network.py --mode benchmark
-
-# 自定义参数运行单个问题
-python mcts_with_reward_network.py --mode single --problem 2 --depth 12 --iterations 1000 --alpha 0.8
-
-# 使用真实表达式提升精度
-python mcts_with_reward_network.py --mode single --problem 3 --oracle "x1^2 + sin(x2)"
-
-# 交互模式运行
-python mcts_with_reward_network.py --mode interactive
-```
-
-### 4.5 输出说明
-
-系统运行后会输出：
-- **找到的最佳表达式**
-- **R²分数**（拟合质量，1.0为完美拟合）
-- **搜索迭代次数**
-- **搜索过程**（可选）
-- **运行时间**
-
-### 4.6 交互模式使用方法
-
-运行 `python mcts_with_reward_network.py --mode interactive` 后：
-
-1. **输入数据维度**：例如输入 `3` 表示有3个变量
-2. **输入数据范围**：例如输入 `-5,5` 表示变量范围在-5到5之间
-3. **生成数据点数量**：例如输入 `100` 表示生成100个数据点
-4. **真实表达式**：（可选）输入真实表达式，或按回车跳过
-5. **搜索参数**：按提示设置深度、迭代次数等
-6. **开始搜索**：系统开始MCTS搜索并实时显示进度
-
----
-
 ## 完整使用流程
 
-### 第一次使用
+### 第一次使用（完整训练）
 
 ```bash
 # 1. 预训练表达式编码器（必须先做）
@@ -285,39 +258,40 @@ python expression_encoder_training.py
 # 2. 训练奖励网络（含编码器微调）
 python reward_network_training.py
 
-# 3. 运行完整系统
-python mcts_with_reward_network.py --mode benchmark
-```
-
-### 日常使用
-
-```bash
-# 使用训练好的模型进行符号回归
-python mcts_with_reward_network.py --mode single --problem 1
-
-# 或者使用交互模式
-python mcts_with_reward_network.py --mode interactive
-```
-
-### 测试编码器功能
-
-```bash
-# 演示编码器功能
+# 3. 验证编码器功能
 python expression_encoder_inference.py demo
 
-# 编码特定表达式
-python expression_encoder_inference.py encode "sin(x1) + cos(x2)"
-
-# 计算相似度
-python expression_encoder_inference.py similarity "x1 + x2" "2*x1 + 2*x2"
+# 4. 运行完整系统进行符号回归
+python mcts_with_reward_network.py
 ```
+
+### 日常使用（直接推理）
+
+```bash
+# 每次直接运行符号回归（使用已训练的模型）
+python mcts_with_reward_network.py
+
+# 或者测试编码器功能
+python expression_encoder_inference.py demo
+python expression_encoder_inference.py encode "x1 + x2^2"
+```
+
+### 重要说明
+
+- **步骤1和2只需要执行一次** - 生成预训练模型
+- **步骤3和4可以重复使用** - 直接使用预训练模型进行推理
+- **模型持久化** - 训练好的模型保存在 `weights/` 目录，重启后仍然可用
 
 ---
 
 ## 常见问题
 
 ### Q: 运行时提示"找不到预训练模型"
-**A:** 请先运行 `python expression_encoder_training.py` 训练编码器
+**A:** 请先运行：
+```bash
+python expression_encoder_training.py
+python reward_network_training.py
+```
 
 ### Q: 训练速度太慢
 **A:** 
@@ -326,11 +300,10 @@ python expression_encoder_inference.py similarity "x1 + x2" "2*x1 + 2*x2"
 - 使用较少的数据：降低生成的数据量
 
 ### Q: 搜索结果不理想
-**A:**
-- 增加迭代次数：`--iterations 1000`
-- 增加搜索深度：`--depth 10`
-- 调整混合权重：`--alpha 0.8`
-- 提供真实表达式：`--oracle "真实表达式"`
+**A:** 尝试以下方法：
+- 调整MCTS参数（修改 `mcts_with_reward_network.py` 中的参数）
+- 增加搜索迭代次数
+- 调整混合权重参数
 
 ### Q: 内存不足
 **A:**
@@ -338,14 +311,29 @@ python expression_encoder_inference.py similarity "x1 + x2" "2*x1 + 2*x2"
 - 使用CPU模式运行（取消CUDA设置）
 - 关闭其他程序释放内存
 
-### Q: 想测试不同参数组合
-**A:** 使用交互模式 `python mcts_with_reward_network.py --mode interactive`，可以实时调整参数
+### Q: 想自定义符号回归问题
+**A:** 修改 `mcts_with_reward_network.py` 中的问题定义，或使用Python API：
+
+```python
+from mcts_with_reward_network import load_trained_models, run_symbolic_regression
+import numpy as np
+
+# 加载模型
+models = load_trained_models()
+
+# 自定义问题
+X = np.random.uniform(-5, 5, (100, 2))
+y = X[:, 0]**2 + np.sin(X[:, 1])
+
+# 运行
+result = run_symbolic_regression(X, y, models=models)
+```
 
 ---
 
 ## 性能说明
 
-- **训练时间**：总计约1.5小时（GPU）或5小时（CPU）
+- **预训练时间**：总计约1.5小时（GPU）或5小时（CPU）
 - **推理速度**：单个表达式编码 < 0.1秒
 - **搜索速度**：通常10-100秒完成一个符号回归问题
 - **内存需求**：训练时2-4GB，运行时512MB-1GB
@@ -356,6 +344,26 @@ python expression_encoder_inference.py similarity "x1 + x2" "2*x1 + 2*x2"
 - **内存**: 最少4GB，推荐8GB
 - **存储**: 2GB可用空间
 - **GPU**: 可选，推荐用于加速训练
+
+## 架构说明
+
+这个系统采用**分离式训练架构**：
+
+1. **预训练阶段**：
+   - 表达式编码器学习通用的表达式结构表示
+   - 奖励网络学习预测表达式性能的映射
+   - 训练完成后模型保存到磁盘
+
+2. **推理阶段**：
+   - 直接加载预训练模型，不进行训练
+   - 使用训练好的模型进行符号回归
+   - 支持重复使用和批量处理
+
+这种设计的优势：
+- 一次训练，多次使用
+- 推理速度快
+- 模型可移植和复用
+- 便于模型升级和替换
 
 ## 许可证
 

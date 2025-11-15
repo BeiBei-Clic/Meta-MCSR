@@ -155,16 +155,18 @@ class ExpressionEncoder(nn.Module):
         # 池化层
         self.pooling = nn.AdaptiveAvgPool1d(1)
         
-    def forward(self, token_ids, attention_mask=None):
+    def forward(self, token_ids, attention_mask=None, return_sequence=False):
         """
         前向传播
         
         Args:
             token_ids: (batch_size, seq_len) token ID序列
             attention_mask: (batch_size, seq_len) 注意力掩码
+            return_sequence: 是否返回序列级别的输出而不是池化后的嵌入
         
         Returns:
-            embeddings: (batch_size, d_model) 表达式嵌入向量
+            如果return_sequence=False: embeddings: (batch_size, d_model) 表达式嵌入向量
+            如果return_sequence=True: sequence_embeddings: (batch_size, seq_len, d_model) 序列嵌入向量
         """
         batch_size, seq_len = token_ids.size()
         
@@ -180,16 +182,20 @@ class ExpressionEncoder(nn.Module):
         else:
             x = self.transformer_encoder(x)
         
-        # 全局平均池化
-        if attention_mask is not None:
-            # 只对非padding位置进行池化
-            mask_expanded = attention_mask.unsqueeze(-1).expand(x.size())
-            sum_mask = mask_expanded.sum(dim=1, keepdim=True)
-            x = (x * mask_expanded).sum(dim=1) / sum_mask.clamp(min=1e-9)
+        if return_sequence:
+            # 返回序列级别的输出
+            return x
         else:
-            x = x.mean(dim=1)
-        
-        return x
+            # 全局平均池化
+            if attention_mask is not None:
+                # 只对非padding位置进行池化
+                mask_expanded = attention_mask.unsqueeze(-1).expand(x.size())
+                sum_mask = mask_expanded.sum(dim=1, keepdim=True)
+                x = (x * mask_expanded).sum(dim=1) / sum_mask.clamp(min=1e-9)
+            else:
+                x = x.mean(dim=1)
+            
+            return x
 
 
 class ExpressionEmbedding:

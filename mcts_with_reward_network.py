@@ -92,11 +92,11 @@ def run_symbolic_regression(X, y, true_expression=None, models=None,
     
     if mcts_params is None:
         mcts_params = {
-            'max_depth': 8,
-            'max_iterations': 500,
-            'max_vars': min(X.shape[1], 3),
-            'eta': 0.999,
-            'alpha_hybrid': 0.7
+            'max_depth': 8,  # 允许足够探索空间
+            'max_iterations': 500,  # 足够的搜索
+            'max_vars': min(X.shape[1], 3),  # 合理的变量限制
+            'eta': 0.999,  # 轻微复杂度惩罚
+            'alpha_hybrid': 0.7  # 平衡性能和结构
         }
     
     start_time = time.time()
@@ -179,13 +179,13 @@ def main():
     X = problem['X']
     y = generate_noisy_data(problem['true_function'], X)
     
-    # 设置MCTS参数
+    # 设置MCTS参数（恢复原始设计）
     mcts_params = {
-        'max_depth': 8,
-        'max_iterations': 500,
-        'max_vars': min(X.shape[1], 3),
-        'eta': 0.999,
-        'alpha_hybrid': 0.7
+        'max_depth': 8,  # 允许足够探索空间
+        'max_iterations': 500,  # 足够的搜索
+        'max_vars': min(X.shape[1], 3),  # 合理的变量限制
+        'eta': 0.999,  # 轻微复杂度惩罚
+        'alpha_hybrid': 0.7  # 平衡性能和结构
     }
     
     # 运行增强MCTS

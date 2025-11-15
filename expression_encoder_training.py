@@ -397,9 +397,19 @@ def main():
     trainer.embedding.save_model(final_path)
     print(f"最终模型已保存到: {final_path}")
     
-    # 清理weights文件夹（可选：只保留最终模型）
-    # 这里可以选择删除旧的检查点文件，只保留最终权重
-    print("训练完成！weights文件夹中已保存最终权重参数。")
+    # 清理weights文件夹，只保留推理必需的文件
+    print("清理weights文件夹...")
+    try:
+        import subprocess
+        import os
+        result = subprocess.run(['python3', 'tools/clean_weights.py', '--force'], 
+                              capture_output=True, text=True, cwd=os.path.dirname(__file__))
+        if result.returncode == 0:
+            print("weights文件夹清理完成！")
+        else:
+            print("警告：weights文件夹清理失败")
+    except Exception as e:
+        print(f"警告：无法运行清理工具 - {e}")
     
     print("=" * 50)
     print("预训练完成！")

@@ -6,10 +6,11 @@ import sys
 import os
 from collections import defaultdict
 
-# 添加nd2py包路径
+# 添加必要的路径
+sys.path.append(os.path.join(os.path.dirname(__file__), 'src'))
 sys.path.append(os.path.join(os.path.dirname(__file__), 'nd2py_package'))
 import nd2py as nd
-from expression_encoder import ExpressionEmbedding, ExpressionTokenizer
+from src.expression_encoder import ExpressionEmbedding, ExpressionTokenizer
 
 
 class ExpressionGenerator:

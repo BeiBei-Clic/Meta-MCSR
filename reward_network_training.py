@@ -7,13 +7,14 @@ import os
 from collections import defaultdict
 import pickle
 
-# 添加nd2py包路径
+# 添加必要的路径
+sys.path.append(os.path.join(os.path.dirname(__file__), 'src'))
 sys.path.append(os.path.join(os.path.dirname(__file__), 'nd2py_package'))
 import nd2py as nd
 from nd2py.utils import R2_score
-from expression_encoder import ExpressionEmbedding
-from reward_network import RewardNetwork, ExperienceReplayBuffer, RewardNetworkTrainer
-from mcts import MCTSWithRewardNetwork
+from src.expression_encoder import ExpressionEmbedding
+from src.reward_network import RewardNetwork, ExperienceReplayBuffer, RewardNetworkTrainer
+from src.mcts import MCTSWithRewardNetwork
 
 
 class DataGenerator:

@@ -11,13 +11,14 @@ warnings.filterwarnings("ignore", category=UserWarning,
 warnings.filterwarnings("ignore", category=UserWarning,
                        message=".*layout=torch.jagged.*")
 
-# 添加nd2py包路径
+# 添加必要的路径
+sys.path.append(os.path.join(os.path.dirname(__file__), 'src'))
 sys.path.append(os.path.join(os.path.dirname(__file__), 'nd2py_package'))
 import nd2py as nd
 from nd2py.utils import R2_score, RMSE_score
 
-from mcts import MCTSWithRewardNetwork
-from reward_network import RewardNetwork
+from src.mcts import MCTSWithRewardNetwork
+from src.reward_network import RewardNetwork
 
 
 def load_trained_models(expr_encoder_path='weights/expression_encoder', 

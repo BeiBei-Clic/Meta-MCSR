@@ -199,6 +199,13 @@ def main():
         help='MCTS最大深度'
     )
     
+    parser.add_argument(
+        '--train-test-split',
+        type=float,
+        default=0.8,
+        help='训练/测试集分割比例 (默认0.8，即80%训练，20%测试)'
+    )
+    
     # 如果没有提供参数，显示帮助
     if len(sys.argv) == 1:
         parser.print_help()
@@ -254,6 +261,23 @@ def main():
     
     def run_symbolic_regression(X, y, true_expression=None, models=None, verbose=True):
         """运行符号回归"""
+        # 划分训练/测试集
+        try:
+            from sklearn.model_selection import train_test_split
+        except ImportError:
+            print("错误：缺少sklearn库")
+            print("请安装: pip install scikit-learn")
+            return None
+        
+        train_ratio = args.train_test_split
+        X_train, X_test, y_train, y_test = train_test_split(
+            X, y, test_size=1-train_ratio, random_state=42
+        )
+        
+        print(f"\n数据集分割:")
+        print(f"  训练集: {X_train.shape[0]} 样本 ({train_ratio*100:.0f}%)")
+        print(f"  测试集: {X_test.shape[0]} 样本 ({(1-train_ratio)*100:.0f}%)")
+        
         # 设置MCTS参数
         mcts_params = {
             'max_depth': args.max_depth,
@@ -288,21 +312,26 @@ def main():
             except:
                 print("警告：无法设置神谕目标")
         
-        # 训练模型
+        # 在训练集上训练模型
         if verbose:
             print("开始训练...")
         
-        best_expr = mcts.fit(X, y)
+        best_expr = mcts.fit(X_train, y_train)
         
         training_time = time.time() - start_time
         
-        # 评估结果
-        r2, rmse = mcts.get_score(X, y)
+        # 在训练集上评估
+        train_r2, train_rmse = mcts.get_score(X_train, y_train)
+        
+        # 在测试集上评估
+        test_r2, test_rmse = mcts.get_score(X_test, y_test)
         
         results = {
             'best_expression': str(best_expr),
-            'r2_score': r2,
-            'rmse_score': rmse,
+            'train_r2_score': train_r2,
+            'train_rmse_score': train_rmse,
+            'test_r2_score': test_r2,
+            'test_rmse_score': test_rmse,
             'training_time': training_time,
             'mcts_instance': mcts
         }
@@ -341,8 +370,10 @@ def main():
         # 显示结果
         print(f"\n结果:")
         print(f"找到的解: {result['best_expression']}")
-        print(f"R2: {result['r2_score']:.4f}")
-        print(f"RMSE: {result['rmse_score']:.4f}")
+        print(f"训练集 R2: {result['train_r2_score']:.4f}")
+        print(f"训练集 RMSE: {result['train_rmse_score']:.4f}")
+        print(f"测试集 R2: {result['test_r2_score']:.4f}")
+        print(f"测试集 RMSE: {result['test_rmse_score']:.4f}")
         print(f"训练时间: {result['training_time']:.2f}s")
         
         # 与真实解比较
@@ -394,8 +425,10 @@ def main():
             # 显示结果
             print(f"\n结果:")
             print(f"找到的解: {result['best_expression']}")
-            print(f"R2: {result['r2_score']:.4f}")
-            print(f"RMSE: {result['rmse_score']:.4f}")
+            print(f"训练集 R2: {result['train_r2_score']:.4f}")
+            print(f"训练集 RMSE: {result['train_rmse_score']:.4f}")
+            print(f"测试集 R2: {result['test_r2_score']:.4f}")
+            print(f"测试集 RMSE: {result['test_rmse_score']:.4f}")
             print(f"训练时间: {result['training_time']:.2f}s")
             
             # 数据集统计信息
@@ -408,14 +441,23 @@ def main():
             print(f"目标值标准差: {y.std():.4f}")
             
             # 模型性能评估
-            if result['r2_score'] > 0.8:
-                print(f"\n模型拟合效果: 优秀 (R2 > 0.8)")
-            elif result['r2_score'] > 0.6:
-                print(f"\n模型拟合效果: 良好 (R2 > 0.6)")
-            elif result['r2_score'] > 0.4:
-                print(f"\n模型拟合效果: 一般 (R2 > 0.4)")
+            if result['test_r2_score'] > 0.8:
+                print(f"\n模型拟合效果: 优秀 (测试集R2 > 0.8)")
+            elif result['test_r2_score'] > 0.6:
+                print(f"\n模型拟合效果: 良好 (测试集R2 > 0.6)")
+            elif result['test_r2_score'] > 0.4:
+                print(f"\n模型拟合效果: 一般 (测试集R2 > 0.4)")
             else:
-                print(f"\n模型拟合效果: 较差 (R2 ≤ 0.4)")
+                print(f"\n模型拟合效果: 较差 (测试集R2 ≤ 0.4)")
+            
+            # 检查过拟合
+            overfitting_gap = result['train_r2_score'] - result['test_r2_score']
+            if overfitting_gap > 0.1:
+                print(f"\n注意：可能存在过拟合 (训练-测试R2差值: {overfitting_gap:.4f})")
+            elif overfitting_gap < -0.05:
+                print(f"\n注意：可能存在欠拟合 (训练-测试R2差值: {overfitting_gap:.4f})")
+            else:
+                print(f"\n模型泛化性能: 良好 (训练-测试R2差值: {overfitting_gap:.4f})")
                 
         except Exception as e:
             print(f"错误：{e}")

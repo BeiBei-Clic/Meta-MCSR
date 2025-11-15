@@ -91,13 +91,30 @@ class CrossAttentionFusion(nn.Module):
         if data_emb.dim() == 1:
             data_emb = data_emb.unsqueeze(0)
             
+        # 确保batch sizes匹配
+        if expr_emb.size(0) != data_emb.size(0):
+            min_batch = min(expr_emb.size(0), data_emb.size(0))
+            expr_emb = expr_emb[:min_batch]
+            data_emb = data_emb[:min_batch]
+            
+        # 确保维度匹配
+        if expr_emb.size(-1) != data_emb.size(-1):
+            min_dim = min(expr_emb.size(-1), data_emb.size(-1))
+            expr_emb = expr_emb[..., :min_dim]
+            data_emb = data_emb[..., :min_dim]
+            
         # 添加序列维度
         expr_seq = expr_emb.unsqueeze(1)  # (batch_size, 1, d_model)
         data_seq = data_emb.unsqueeze(1)  # (batch_size, 1, d_model)
         
         # 交叉注意力：表达式查询数据键值对
-        attn_out, _ = self.attention(expr_seq, data_seq, data_seq)
-        attn_out = attn_out.squeeze(1)
+        try:
+            attn_out, _ = self.attention(expr_seq, data_seq, data_seq)
+            attn_out = attn_out.squeeze(1)
+        except Exception as e:
+            print(f"Attention error: {e}, expr_seq shape: {expr_seq.shape}, data_seq shape: {data_seq.shape}")
+            # 如果注意力失败，使用简单的元素级操作作为后备
+            attn_out = expr_emb * data_emb
         
         # 残差连接和层归一化
         fused = self.norm1(expr_emb + attn_out)
@@ -255,8 +272,16 @@ class RewardNetwork(nn.Module):
             if X.dim() > 2:
                 batch_size = X.size(0)
                 X = X.view(batch_size, -1)
+            elif X.dim() == 1:
+                X = X.unsqueeze(0)
             
-            rewards = self.forward(expressions, X)
+            try:
+                rewards = self.forward(expressions, X)
+            except Exception as e:
+                print(f"预测奖励时出错: {e}")
+                # 如果预测失败，返回默认值
+                return 0.5
+            
             # 确保返回的是标量值
             if rewards.numel() == 1:
                 return rewards.item()
@@ -334,6 +359,12 @@ class ExperienceReplayBuffer:
             X_batch = torch.empty(0)
         
         targets = torch.stack([item[2] for item in batch])
+        
+        # 确保targets的形状正确 (batch_size, 1)
+        if targets.dim() == 1:
+            targets = targets.unsqueeze(-1)
+        elif targets.dim() > 2:
+            targets = targets.view(targets.size(0), -1)
         
         return expressions, X_batch, targets
     

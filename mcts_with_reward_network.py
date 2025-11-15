@@ -68,19 +68,69 @@ def load_dataset_from_file(file_path):
         raise FileNotFoundError(f"数据集文件不存在: {file_path}")
     
     try:
-        data = np.load(file_path)
-        if 'X' in data and 'y' in data:
-            X = data['X']
-            y = data['y']
+        # 尝试加载为NPZ格式
+        try:
+            data = np.load(file_path)
+            if 'X' in data and 'y' in data:
+                X = data['X']
+                y = data['y']
+                return {
+                    'X': X,
+                    'y': y,
+                    'name': os.path.basename(file_path),
+                    'description': f"从NPZ文件加载的数据集: {file_path}",
+                    'true_expression': None  # 用户数据没有真实表达式
+                }
+        except (ValueError, OSError) as e:
+            # 如果不是NPZ格式，尝试加载为纯文本格式
+            if "pickled" in str(e) or "object" in str(e):
+                # 这是文本数据文件，使用loadtxt
+                try:
+                    data = np.loadtxt(file_path)
+                    if data.ndim == 1:
+                        # 单列数据，假设只有标签
+                        y = data
+                        X = np.arange(len(y)).reshape(-1, 1)  # 创建简单的索引特征
+                    else:
+                        # 多列数据，最后一列为标签，前面为特征
+                        X = data[:, :-1]  # 前面所有列作为特征
+                        y = data[:, -1]   # 最后一列作为标签
+                    
+                    return {
+                        'X': X,
+                        'y': y,
+                        'name': os.path.basename(file_path),
+                        'description': f"从文本文件加载的数据集: {file_path} (特征数: {X.shape[1]}, 样本数: {X.shape[0]})",
+                        'true_expression': None  # 用户数据没有真实表达式
+                    }
+                except Exception as text_e:
+                    raise ValueError(f"无法解析为文本格式的数据文件: {text_e}")
+            else:
+                raise e
+        
+        # 如果执行到这里，说明不是NPZ格式且没有抛出pickle错误
+        # 尝试作为文本文件处理
+        try:
+            data = np.loadtxt(file_path)
+            if data.ndim == 1:
+                # 单列数据，假设只有标签
+                y = data
+                X = np.arange(len(y)).reshape(-1, 1)  # 创建简单的索引特征
+            else:
+                # 多列数据，最后一列为标签，前面为特征
+                X = data[:, :-1]  # 前面所有列作为特征
+                y = data[:, -1]   # 最后一列作为标签
+            
             return {
                 'X': X,
                 'y': y,
                 'name': os.path.basename(file_path),
-                'description': f"从文件加载的数据集: {file_path}",
+                'description': f"从文本文件加载的数据集: {file_path} (特征数: {X.shape[1]}, 样本数: {X.shape[0]})",
                 'true_expression': None  # 用户数据没有真实表达式
             }
-        else:
-            raise ValueError(f"数据集文件必须包含'X'和'y'数组")
+        except Exception as text_e:
+            raise ValueError(f"无法解析为文本格式的数据文件: {text_e}")
+            
     except Exception as e:
         raise ValueError(f"加载数据集失败: {e}")
 
@@ -92,15 +142,22 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 示例用法:
-  python mcts_with_reward_network.py composite                # 运行复合函数测试
-  python mcts_with_reward_network.py dataset-file --dataset-path data.npz  # 运行指定数据集文件测试
-  python mcts_with_reward_network.py --help                  # 显示帮助信息
+  python mcts_with_reward_network.py composite                           # 运行复合函数测试
+  python mcts_with_reward_network.py dataset-file --dataset-path data.npz  # 运行NPZ格式数据集测试
+  python mcts_with_reward_network.py dataset-file --dataset-path dataset/Feynman_with_units/I.6.2  # 运行费曼数据集测试
+  python mcts_with_reward_network.py --help                              # 显示帮助信息
 
 数据集文件格式:
-  - 支持numpy .npz格式
-  - 必须包含'X'（输入数据）和'y'（输出数据）数组
-  - X的形状应该是 (n_samples, n_features)
-  - y的形状应该是 (n_samples,)
+  1. NPZ格式 (推荐):
+     - 支持numpy .npz格式
+     - 必须包含'X'（输入数据）和'y'（输出数据）数组
+     - X的形状应该是 (n_samples, n_features)
+     - y的形状应该是 (n_samples,)
+  
+  2. 纯文本格式 (如费曼数据集):
+     - 每行空格分隔的浮点数
+     - 最后一列为标签y，前面为输入特征
+     - 自动检测并处理，无需额外转换
         """
     )
     

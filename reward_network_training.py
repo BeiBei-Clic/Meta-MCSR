@@ -348,8 +348,10 @@ class RewardNetworkTrainingManager:
             if avg_train_loss < best_val_loss:
                 best_val_loss = avg_train_loss
                 patience_counter = 0
-                # 保存最佳模型
-                self.save_model(f'weights/reward_network_best')
+                # 保存检查点模型
+                checkpoint_path = f'checkpoints/reward_network/best_epoch_{epoch+1}'
+                self.save_model(checkpoint_path)
+                print(f"保存检查点到: {checkpoint_path}")
             else:
                 patience_counter += 1
             
@@ -486,6 +488,9 @@ class RewardNetworkTrainingManager:
         
         print("\n" + "=" * 60)
         print("奖励网络训练完成！")
+        
+        # 清理weights文件夹（可选：只保留最终模型）
+        print("weights文件夹中已保存最终权重参数。")
 
 
 def main():

@@ -334,13 +334,18 @@ class ExpressionPreTrainer:
                 
                 if val_loss < best_val_loss:
                     best_val_loss = val_loss
-                    # 保存最佳模型
-                    self.embedding.save_model(save_path)
-                    print(f"保存模型到: {save_path}")
+                    # 保存检查点模型
+                    checkpoint_path = f'checkpoints/expression_encoder/best_epoch_{epoch+1}'
+                    os.makedirs(os.path.dirname(checkpoint_path), exist_ok=True)
+                    self.embedding.save_model(checkpoint_path)
+                    print(f"保存检查点到: {checkpoint_path}")
             else:
-                # 如果没有验证集，每个epoch都保存
-                self.embedding.save_model(save_path)
-                print(f"保存模型到: {save_path}")
+                # 如果没有验证集，定期保存检查点
+                if (epoch + 1) % 10 == 0:
+                    checkpoint_path = f'checkpoints/expression_encoder/epoch_{epoch+1}'
+                    os.makedirs(os.path.dirname(checkpoint_path), exist_ok=True)
+                    self.embedding.save_model(checkpoint_path)
+                    print(f"保存检查点到: {checkpoint_path}")
         
         print(f"\n预训练完成！最佳验证损失: {best_val_loss:.4f}")
 
@@ -384,8 +389,17 @@ def main():
         train_expressions=train_expressions,
         val_expressions=val_expressions,
         num_epochs=30,
-        save_path='weights/expression_encoder'
+        save_path='weights/expression_encoder'  # 这个参数现在只用于参考
     )
+    
+    # 保存最终模型到weights文件夹
+    final_path = 'weights/expression_encoder'
+    trainer.embedding.save_model(final_path)
+    print(f"最终模型已保存到: {final_path}")
+    
+    # 清理weights文件夹（可选：只保留最终模型）
+    # 这里可以选择删除旧的检查点文件，只保留最终权重
+    print("训练完成！weights文件夹中已保存最终权重参数。")
     
     print("=" * 50)
     print("预训练完成！")

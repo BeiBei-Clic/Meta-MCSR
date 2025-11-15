@@ -41,10 +41,9 @@ python expression_encoder_training.py
 
 **输出文件：**
 ```
-weights/expression_encoder/
-├── model.pth              # 预训练模型权重
-├── tokenizer.pkl          # 分词器配置
-└── config.json            # 模型配置
+weights/
+├── expression_encoder_model.pth                    # 表达式编码器权重
+└── expression_encoder_tokenizer.pkl               # 表达式分词器配置
 ```
 
 **训练时间：** 约30分钟（GPU）或2小时（CPU）
@@ -79,12 +78,16 @@ python reward_network_training.py
 
 **输出文件：**
 ```
-weights/reward_network_final/
-├── expr_encoder_model.pth           # 微调后的表达式编码器权重
-├── reward_network.pth               # 训练好的奖励网络权重
-├── tokenizer.pkl                    # 分词器配置
-└── training_history.pkl             # 训练历史记录
+weights/
+├── expression_encoder_model.pth                    # 微调后的表达式编码器权重
+├── expression_encoder_tokenizer.pkl               # 表达式分词器配置
+└── reward_network_final_reward_network.pth        # 奖励网络权重
 ```
+
+**重要说明：**
+- 训练历史文件保存在 `training_logs/` 目录中，不在weights目录
+- 表达式编码器会被微调并更新 `expression_encoder_model.pth`
+- 分词器配置在预训练和微调过程中保持一致
 
 **参数说明：**
 此脚本也使用固定参数，包括：
@@ -246,6 +249,80 @@ python expression_encoder_inference.py analyze "log(x1) * sin(x2) + exp(x3)"
 ```
 
 ---
+
+## Weights目录详解
+
+### 目录说明
+
+`weights/` 目录用于存放预训练后的模型文件，设计原则是：
+
+**"预训练后锁定，推理时直接使用"**
+
+### 文件结构
+
+```
+weights/
+├── expression_encoder_model.pth                    # 表达式编码器权重（会被微调更新）
+├── expression_encoder_tokenizer.pkl               # 表达式分词器配置
+└── reward_network_final_reward_network.pth        # 奖励网络权重
+```
+
+### 文件详解
+
+#### 1. expression_encoder_model.pth
+- **作用**：表达式编码器权重文件
+- **来源**：
+  - 初始版本来自 `expression_encoder_training.py` 预训练
+  - 在 `reward_network_training.py` 中会被微调并覆盖
+- **推理时使用**：**这是最终版本**，针对奖励网络任务优化
+- **大小**：约12MB
+
+#### 2. expression_encoder_tokenizer.pkl
+- **作用**：表达式分词器配置文件
+- **包含**：表达式解析和编码的配置信息
+- **稳定性**：在预训练和微调过程中保持一致，不被修改
+- **大小**：约455字节
+
+#### 3. reward_network_final_reward_network.pth
+- **作用**：奖励网络权重文件
+- **包含**：数据编码器、融合模块、奖励头等组件的参数
+- **依赖**：与表达式编码器协同工作
+- **大小**：约2.3MB
+
+### 训练流程更新机制
+
+1. **表达式编码器预训练**
+   ```
+   生成: expression_encoder_model.pth (初始版本)
+        expression_encoder_tokenizer.pkl (分词器)
+   ```
+
+2. **奖励网络训练**
+   ```
+   加载: expression_encoder_model.pth (初始版本)
+   微调: expression_encoder_model.pth (覆盖更新为微调版本)
+   生成: reward_network_final_reward_network.pth (奖励网络)
+   ```
+
+3. **推理阶段**
+   ```
+   使用: expression_encoder_model.pth (微调版本 - 性能优化)
+        reward_network_final_reward_network.pth (奖励网络)
+   ```
+
+### 清理机制
+
+训练完成后，系统会自动清理weights目录中的临时文件：
+- 删除：`*_training_history.pkl` - 训练历史移到 `training_logs/`
+- 删除：`*.log` - 日志文件
+- 删除：`*.tmp` - 临时文件
+- 删除其他非推理必需文件
+
+### 版本管理
+
+- **不保留多个版本**：微调后的编码器直接覆盖原始版本
+- **推理使用最优版本**：确保始终使用针对奖励网络任务优化的编码器
+- **避免用户困惑**：用户不需要选择使用哪个版本
 
 ## 完整使用流程
 

@@ -2,5 +2,12 @@
 SR4MDL
 result
 nd2py_package
-weights
-checkpoints
+weights/
+checkpoints/
+training_logs/
+tools/
+
+# weights目录应该只包含模型权重和配置文件，用于推理：
+# - *_model.pth (模型权重)
+# - *_tokenizer.pkl (分词器配置)
+# - config.json (模型配置，如果存在)

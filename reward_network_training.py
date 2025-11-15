@@ -436,22 +436,32 @@ class RewardNetworkTrainingManager:
         if self.reward_network:
             self.reward_network.save_model(model_path)
             
-            # 保存训练历史
-            with open(model_path + '_training_history.pkl', 'wb') as f:
+            # 保存训练历史到单独目录（不在weights文件夹中）
+            import os
+            training_history_dir = 'training_logs'
+            os.makedirs(training_history_dir, exist_ok=True)
+            history_path = os.path.join(training_history_dir, 'reward_network_training_history.pkl')
+            with open(history_path, 'wb') as f:
                 pickle.dump(dict(self.training_history), f)
             
             print(f"模型已保存到: {model_path}")
+            print(f"训练历史已保存到: {history_path}")
     
     def load_model(self, model_path):
         """加载模型"""
         if self.reward_network:
             self.reward_network.load_model(model_path)
             
-            # 加载训练历史
+            # 加载训练历史（从单独目录）
             try:
-                with open(model_path + '_training_history.pkl', 'rb') as f:
-                    self.training_history = pickle.load(f)
-                print(f"训练历史已加载")
+                import os
+                history_path = os.path.join('training_logs', 'reward_network_training_history.pkl')
+                if os.path.exists(history_path):
+                    with open(history_path, 'rb') as f:
+                        self.training_history = pickle.load(f)
+                    print(f"训练历史已加载")
+                else:
+                    print("未找到训练历史文件")
             except:
                 print("无法加载训练历史")
     
@@ -530,6 +540,19 @@ def main():
     
     # 运行完整训练流程
     trainer.run_complete_training(train_datasets, test_datasets)
+    
+    # 清理weights文件夹，只保留推理必需的文件
+    print("\n清理weights文件夹...")
+    try:
+        import subprocess
+        result = subprocess.run(['python3', 'tools/clean_weights.py', '--force'], 
+                              capture_output=True, text=True, cwd=os.path.dirname(__file__))
+        if result.returncode == 0:
+            print("weights文件夹清理完成！")
+        else:
+            print("警告：weights文件夹清理失败")
+    except Exception as e:
+        print(f"警告：无法运行清理工具 - {e}")
     
     print("=" * 50)
     print("训练完成！")

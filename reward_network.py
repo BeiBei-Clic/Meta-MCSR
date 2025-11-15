@@ -290,8 +290,9 @@ class RewardNetwork(nn.Module):
     
     def save_model(self, model_path):
         """保存模型"""
-        # 保存表达式嵌入器
-        self.expression_embedding.save_model(model_path + '_expr_encoder')
+        # 保存表达式嵌入器到主weights目录（覆盖原始预训练版本）
+        # 这样确保推理时使用微调后的编码器
+        self.expression_embedding.save_model('weights/expression_encoder')
         
         # 保存奖励网络的其他部分
         model_state = {
@@ -304,11 +305,12 @@ class RewardNetwork(nn.Module):
         
         torch.save(model_state, model_path + '_reward_network.pth')
         print(f"奖励网络已保存到: {model_path}")
+        print(f"微调后的编码器已更新到: weights/expression_encoder")
     
     def load_model(self, model_path):
         """加载模型"""
-        # 加载表达式嵌入器
-        self.expression_embedding.load_model(model_path + '_expr_encoder')
+        # 加载表达式嵌入器（从主weights目录）
+        self.expression_embedding.load_model('weights/expression_encoder')
         
         # 加载奖励网络的其他部分
         model_state = torch.load(model_path + '_reward_network.pth', map_location=self.expression_embedding.device)
@@ -318,6 +320,7 @@ class RewardNetwork(nn.Module):
         self.reward_head.load_state_dict(model_state['reward_head_state_dict'])
         
         print(f"奖励网络已从 {model_path} 加载")
+        print(f"编码器已从 weights/expression_encoder 加载")
 
 
 class ExperienceReplayBuffer:

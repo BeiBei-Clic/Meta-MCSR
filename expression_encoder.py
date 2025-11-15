@@ -191,7 +191,11 @@ class ExpressionEncoder(nn.Module):
                 # 只对非padding位置进行池化
                 mask_expanded = attention_mask.unsqueeze(-1).expand(x.size())
                 sum_mask = mask_expanded.sum(dim=1, keepdim=True)
-                x = (x * mask_expanded).sum(dim=1) / sum_mask.clamp(min=1e-9)
+                # 确保sum_mask的形状是[batch_size, 1]
+                if sum_mask.dim() == 3 and sum_mask.size(-1) > 1:
+                    sum_mask = sum_mask.sum(dim=-1, keepdim=True)
+                # 池化操作
+                x = (x * mask_expanded).sum(dim=1) / sum_mask.squeeze(-1).clamp(min=1e-9)
             else:
                 x = x.mean(dim=1)
             

@@ -85,6 +85,12 @@ class CrossAttentionFusion(nn.Module):
         Returns:
             fused: (batch_size, d_model) 融合后的向量
         """
+        # 确保输入是2D张量
+        if expr_emb.dim() == 1:
+            expr_emb = expr_emb.unsqueeze(0)
+        if data_emb.dim() == 1:
+            data_emb = data_emb.unsqueeze(0)
+            
         # 添加序列维度
         expr_seq = expr_emb.unsqueeze(1)  # (batch_size, 1, d_model)
         data_seq = data_emb.unsqueeze(1)  # (batch_size, 1, d_model)
@@ -145,12 +151,19 @@ class RewardNetwork(nn.Module):
         
     def set_data_encoder_dim(self, input_dim):
         """设置数据编码器的输入维度"""
+        # 获取原始的hidden_dims配置
+        original_hidden_dims = [128, 64]  # 与初始化时保持一致
+        
         self.data_encoder = DataEncoder(
             input_dim=input_dim,
-            hidden_dims=self.data_encoder.encoder[0].out_features,
+            hidden_dims=original_hidden_dims,
             output_dim=self.d_model,
             dropout=0.1
         ).to(self.expression_embedding.device)
+        
+        # 确保融合模块和奖励头也在正确的设备上
+        self.fusion = self.fusion.to(self.expression_embedding.device)
+        self.reward_head = self.reward_head.to(self.expression_embedding.device)
     
     def forward(self, expressions, X):
         """
@@ -172,16 +185,52 @@ class RewardNetwork(nn.Module):
         expr_embeddings = self.expression_embedding.encode_expressions(expressions)
         expr_tensor = torch.FloatTensor(expr_embeddings).to(self.expression_embedding.device)
         
+        # 确保expr_tensor是2D张量
+        if expr_tensor.dim() > 2:
+            expr_tensor = expr_tensor.view(batch_size, -1)
+        
         # 编码数据
         if X.dim() == 1:
             X = X.unsqueeze(-1)  # 添加特征维度
+        
+        # 确保X是2D张量
+        if X.dim() > 2:
+            # 如果是4D张量，可能是(batch, seq_len, feature_dim, hidden_dim)
+            # 我们需要将其展平为2D，保留batch维度
+            batch_size = X.size(0)
+            X = X.view(batch_size, -1)  # 展平为2D
+            
+        # 如果X的样本数与表达式数量不匹配，进行调整
+        if X.size(0) != batch_size:
+            # 如果X只有一个样本，复制batch_size次
+            if X.size(0) == 1:
+                X = X.expand(batch_size, -1)
+            # 如果表达式只有一个，使用第一个X样本
+            elif batch_size == 1:
+                X = X[:1]
+            # 否则，取最小值
+            else:
+                min_size = min(X.size(0), batch_size)
+                X = X[:min_size]
+                expr_tensor = expr_tensor[:min_size]
+                batch_size = min_size
+                
         data_tensor = X.to(self.expression_embedding.device)
         
+        # 确保张量维度匹配
+        if expr_tensor.dim() == 1:
+            expr_tensor = expr_tensor.unsqueeze(0)
+        if data_tensor.dim() == 1:
+            data_tensor = data_tensor.unsqueeze(0)
+        
+        # 编码数据
+        data_encoded = self.data_encoder(data_tensor)
+            
         # 融合表达和数据
         if self.fusion_type == 'attention':
-            fused = self.fusion(expr_tensor, data_tensor)
+            fused = self.fusion(expr_tensor, data_encoded)
         else:  # concat
-            combined = torch.cat([expr_tensor, data_tensor], dim=-1)
+            combined = torch.cat([expr_tensor, data_encoded], dim=-1)
             fused = self.fusion(combined)
         
         # 预测奖励
@@ -189,12 +238,30 @@ class RewardNetwork(nn.Module):
         
         return rewards
     
-    def predict_reward(self, expression, X):
-        """预测单个表达式的奖励值"""
+    def predict_reward(self, expressions, X):
+        """
+        预测表达式-数据对的奖励
+        
+        Args:
+            expressions: List[str] 或 str 表达式字符串列表
+            X: torch.Tensor (batch_size, input_dim) 输入数据特征
+        
+        Returns:
+            rewards: torch.Tensor (batch_size, 1) 预测的奖励值
+        """
         self.eval()
         with torch.no_grad():
-            reward = self.forward([expression], X)
-            return reward.cpu().item()
+            # 确保X是2D张量
+            if X.dim() > 2:
+                batch_size = X.size(0)
+                X = X.view(batch_size, -1)
+            
+            rewards = self.forward(expressions, X)
+            # 确保返回的是标量值
+            if rewards.numel() == 1:
+                return rewards.item()
+            else:
+                return rewards.mean().item()
     
     def save_model(self, model_path):
         """保存模型"""
@@ -247,7 +314,25 @@ class ExperienceReplayBuffer:
         batch = random.sample(self.buffer, batch_size)
         
         expressions = [item[0] for item in batch]
-        X_batch = torch.stack([item[1] for item in batch])
+        
+        # 确保X张量的维度正确
+        X_list = [item[1] for item in batch]
+        if len(X_list) > 0:
+            # 检查第一个张量的维度
+            first_X = X_list[0]
+            if first_X.dim() > 2:
+                # 如果是高维张量，先展平为2D
+                X_list = [x.view(x.size(0), -1) if x.dim() > 2 else x for x in X_list]
+            
+            # 确保所有张量都有相同的形状
+            # 取第一个张量的形状作为参考
+            target_shape = X_list[0].shape
+            X_list = [x.view(target_shape) if x.shape != target_shape else x for x in X_list]
+            
+            X_batch = torch.stack(X_list)
+        else:
+            X_batch = torch.empty(0)
+        
         targets = torch.stack([item[2] for item in batch])
         
         return expressions, X_batch, targets

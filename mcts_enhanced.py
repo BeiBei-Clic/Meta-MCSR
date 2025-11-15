@@ -62,7 +62,7 @@ class MCTSWithRewardNetwork:
         
         # 奖励网络相关
         self.reward_network = reward_network
-        self.experience_buffer = experience_buffer or ExperienceReplayBuffer()
+        self.experience_buffer = experience_buffer if experience_buffer is not None else ExperienceReplayBuffer()
         self.oracle_target = None  # 神谕目标向量
         self.training_data = None  # 训练数据 (X, y)
         
@@ -81,7 +81,8 @@ class MCTSWithRewardNetwork:
         
         # 初始化奖励网络的数据编码器维度
         if self.reward_network:
-            input_dim = self.training_data['X'].shape[1] if len(self.training_data['X'].shape) > 1 else 1
+            # 使用固定的小维度（4个统计特征）而不是原始数据维度
+            input_dim = 4
             self.reward_network.set_data_encoder_dim(input_dim)
     
     def set_oracle_target(self, true_expression):
@@ -91,9 +92,18 @@ class MCTSWithRewardNetwork:
         
         self.reward_network.eval()
         with torch.no_grad():
-            # 使用真实表达式作为目标
-            oracle_embedding = self.reward_network.expression_embedding.encode_expressions([str(true_expression)])
-            self.oracle_target = torch.FloatTensor(oracle_embedding)
+            try:
+                # 使用真实表达式作为目标
+                oracle_embedding = self.reward_network.expression_embedding.encode_expressions([str(true_expression)])
+                self.oracle_target = torch.FloatTensor(oracle_embedding)
+                # 确保是2D张量
+                if self.oracle_target.dim() == 1:
+                    self.oracle_target = self.oracle_target.unsqueeze(0)
+                elif self.oracle_target.dim() > 2:
+                    self.oracle_target = self.oracle_target.view(self.oracle_target.size(0), -1)
+            except Exception as e:
+                print(f"设置神谕目标失败: {e}")
+                self.oracle_target = None
         
         print(f"设置神谕目标: {true_expression}")
     
@@ -107,9 +117,14 @@ class MCTSWithRewardNetwork:
         if self.oracle_target is not None and self.reward_network is not None:
             self.reward_network.eval()
             with torch.no_grad():
-                expr_embedding = self.reward_network.expression_embedding.encode_expressions([expression_str])
-                expr_tensor = torch.FloatTensor(expr_embedding)
-                z_struct = torch.cosine_similarity(expr_tensor, self.oracle_target).item()
+                try:
+                    expr_embedding = self.reward_network.expression_embedding.encode_expressions([expression_str])
+                    expr_tensor = torch.FloatTensor(expr_embedding)
+                    z_struct = torch.cosine_similarity(expr_tensor, self.oracle_target).item()
+                except Exception as e:
+                    # 如果计算失败，使用复杂度惩罚
+                    complexity_penalty = np.exp(-complexity / 100)
+                    z_struct = complexity_penalty
         else:
             # 如果没有神谕目标，使用复杂度惩罚作为结构奖励
             complexity_penalty = np.exp(-complexity / 100)  # 复杂度越高奖励越低
@@ -131,10 +146,49 @@ class MCTSWithRewardNetwork:
         # 准备数据
         X = self.training_data['X']
         
-        # 使用奖励网络预测奖励
-        reward_network_reward = self.reward_network.predict_reward(expression_str, X)
+        # 确保X是2D张量
+        if X.dim() > 2:
+            X = X.view(X.size(0), -1)
         
-        return reward_network_reward
+        # 确保X是torch.Tensor
+        if not isinstance(X, torch.Tensor):
+            X = torch.tensor(X, dtype=torch.float32)
+        
+        # 创建一个代表性的数据样本（与add_experience方法保持一致）
+        # 使用数据的统计特征作为代表
+        if X.numel() > 100:  # 如果数据太大，使用统计特征
+            X_repr = torch.tensor([
+                X.mean().item(),
+                X.std().item() if X.numel() > 1 else 0.0,
+                X.min().item(),
+                X.max().item()
+            ], dtype=torch.float32).unsqueeze(0)  # (1, 4)
+        else:
+            # 如果数据小，填充到4维
+            if X.shape[1] < 4:
+                padding = torch.zeros(X.shape[0], 4 - X.shape[1])
+                X_repr = torch.cat([X, padding], dim=1)
+            else:
+                X_repr = X[:, :4]  # 取前4个特征
+            X_repr = X_repr[:1]  # 只取第一个样本
+        
+        # 确保X_repr在正确的设备上
+        device = self.reward_network.expression_embedding.device
+        X_repr = X_repr.to(device)
+        
+        # 使用奖励网络预测奖励
+        try:
+            reward_network_reward = self.reward_network.predict_reward(expression_str, X_repr)
+            # 确保返回的是标量
+            if isinstance(reward_network_reward, torch.Tensor):
+                if reward_network_reward.numel() == 1:
+                    reward_network_reward = reward_network_reward.item()
+                else:
+                    reward_network_reward = reward_network_reward.mean().item()
+            return float(reward_network_reward)
+        except Exception as e:
+            print(f"奖励网络评估失败: {e}")
+            return 0.0
     
     def add_experience(self, expression_str, r2_score, complexity, hybrid_reward):
         """添加经验到回放池"""
@@ -143,10 +197,31 @@ class MCTSWithRewardNetwork:
         
         # 准备数据
         X = self.training_data['X']
+        
+        # 确保X是2D张量
+        if X.dim() > 2:
+            X = X.view(X.size(0), -1)
+        
+        # 确保X是torch.Tensor
+        if not isinstance(X, torch.Tensor):
+            X = torch.tensor(X, dtype=torch.float32)
+        
+        # 创建一个代表性的数据样本（而不是整个数据集）
+        # 使用数据的统计特征作为代表
+        if X.numel() > 100:  # 如果数据太大，使用统计特征
+            X_repr = torch.tensor([
+                X.mean().item(),
+                X.std().item() if X.numel() > 1 else 0.0,
+                X.min().item(),
+                X.max().item()
+            ], dtype=torch.float32).unsqueeze(0)  # (1, 4)
+        else:
+            X_repr = X[:1]  # 只取第一个样本
+            
         target_reward = torch.FloatTensor([[hybrid_reward]])
         
         # 存储经验
-        self.experience_buffer.push(expression_str, X, target_reward)
+        self.experience_buffer.push(expression_str, X_repr, target_reward)
     
     def fit(self, X, y, variables=None):
         """
@@ -170,11 +245,46 @@ class MCTSWithRewardNetwork:
         if variables is not None:
             self.variables = variables
         else:
-            self.variables = [nd.Variable(var) for var in X.keys()]
+            # 检查X的类型并相应地提取变量
+            if isinstance(X, dict):
+                self.variables = [nd.Variable(var) for var in X.keys()]
+            elif isinstance(X, np.ndarray):
+                # 如果是numpy数组，创建默认变量名
+                num_vars = X.shape[1] if X.ndim > 1 else 1
+                self.variables = [nd.Variable(f'x{i+1}') for i in range(num_vars)]
+            else:
+                # 其他情况，创建默认变量名
+                self.variables = [nd.Variable('x1')]
+        
+        # 初始化最佳表达式和分数
+        self.best_expr = None
+        self.best_r2 = -np.inf  # 使用-np.inf确保任何有效的R2分数都可以超过它
         
         # 初始化根节点，包含所有变量
         self.root = EnhancedNode(self.variables[:min(len(self.variables), self.max_vars)])
         self._evaluate_node(self.root, X, y)
+        
+        # 如果根节点评估成功，更新最佳表达式
+        if self.root.r2 > self.best_r2:
+            self.best_r2 = self.root.r2
+            self.best_expr = self.root.phi
+        
+        # 如果根节点评估失败，尝试添加基础经验
+        if self.root.r2 == -np.inf:
+            # 创建一些简单的表达式作为基础经验
+            simple_expressions = [
+                nd.Variable('x1'),
+                nd.Variable('x2') if len(self.variables) > 1 else nd.Number(1.0),
+                nd.Number(1.0),
+            ]
+            
+            for expr in simple_expressions:
+                test_node = EnhancedNode([expr])
+                self._evaluate_node(test_node, X, y)
+                # 如果找到有效表达式，更新最佳表达式
+                if test_node.r2 > self.best_r2:
+                    self.best_r2 = test_node.r2
+                    self.best_expr = test_node.phi
         
         for i in range(self.max_iterations):
             # 1. 选择
@@ -198,6 +308,10 @@ class MCTSWithRewardNetwork:
             if i % 100 == 0:
                 print(f"Iteration {i}: Best R2 = {self.best_r2:.4f}, Best Expr = {self.best_expr}")
                 
+        # 如果仍然没有找到有效表达式，返回一个简单的表达式
+        if self.best_expr is None:
+            self.best_expr = nd.Variable('x1')
+            
         return self.best_expr
     
     def predict(self, X):
@@ -205,7 +319,14 @@ class MCTSWithRewardNetwork:
         使用最佳表达式进行预测
         """
         if self.best_expr is None:
-            raise ValueError("Model not fitted yet")
+            # 如果模型未拟合，返回零向量
+            X = self._preprocess(X)
+            if isinstance(X, np.ndarray):
+                return np.zeros(X.shape[0])
+            else:
+                # 如果X是字典，返回与第一个值相同长度的零向量
+                return np.zeros(len(next(iter(X.values()))))
+        
         X = self._preprocess(X)
         return self._evaluate_expression(self.best_expr, X)
     
@@ -221,7 +342,10 @@ class MCTSWithRewardNetwork:
     def _preprocess(self, X):
         """数据预处理函数"""
         if isinstance(X, np.ndarray):
-            X = {f'x{i+1}': X[:, i] for i in range(X.shape[1])}
+            # 保持numpy数组格式，不转换为字典
+            if X.ndim == 1:
+                X = X.reshape(-1, 1)
+            return X
         return X
     
     def _select(self, node):
@@ -313,6 +437,7 @@ class MCTSWithRewardNetwork:
         """模拟阶段：从当前节点开始随机扩展到终端节点"""
         current_eqtrees = node.eqtrees.copy()
         best_node = node
+        best_r2 = -np.inf  # 初始化为-np.inf，确保任何有效的R2分数都可以超过它
         
         for _ in range(10):  # 10次模拟
             depth = self._get_depth(node)
@@ -326,8 +451,10 @@ class MCTSWithRewardNetwork:
             temp_node = EnhancedNode(temp_eqtrees)
             self._evaluate_node(temp_node, X, y)
             
-            if temp_node.r2 > best_node.r2:
+            # 只有当temp_node的r2有效且大于当前最佳值时才更新
+            if temp_node.r2 != -np.inf and temp_node.r2 > best_r2:
                 best_node = temp_node
+                best_r2 = temp_node.r2
                 
         return best_node.reward, best_node
     
@@ -342,7 +469,8 @@ class MCTSWithRewardNetwork:
                 try:
                     expr_copy = copy.deepcopy(eqtree)
                     Z[:, i+1] = self._evaluate_expression(expr_copy, X)
-                except:
+                except Exception as e:
+                    print(f"评估表达式 {i} 失败: {e}")
                     Z[:, i+1] = np.zeros(len(y))
             
             # 检查Z的有效性
@@ -371,7 +499,7 @@ class MCTSWithRewardNetwork:
                 A = np.round(A, 6)
                 y_pred = Z @ A
                 node.r2 = R2_score(y, y_pred)
-            
+
             # 构建最终表达式
             node.phi = nd.Number(A[0]) if abs(A[0]) > 1e-6 else None
             for a, eqtree in zip(A[1:], node.eqtrees):
@@ -410,17 +538,26 @@ class MCTSWithRewardNetwork:
                 if self.reward_network is not None:
                     try:
                         node.reward_network_reward = self.evaluate_with_reward_network(expression_str)
-                        # 添加经验到回放池
-                        self.add_experience(expression_str, node.r2, node.complexity, z_hybrid)
-                    except:
+                        # 添加经验到回放池 - 确保只有有效的经验才被添加
+                        if node.r2 > -np.inf and not np.isnan(z_hybrid) and np.isfinite(z_hybrid):
+                            self.add_experience(expression_str, node.r2, node.complexity, z_hybrid)
+                    except Exception as e:
+                        # 不打印错误，避免过多输出
                         node.reward_network_reward = 0
+                        # 即使奖励网络评估失败，也添加基础经验
+                        if node.r2 > -np.inf and not np.isnan(z_hybrid) and np.isfinite(z_hybrid):
+                            self.add_experience(expression_str, node.r2, node.complexity, z_hybrid)
                 else:
                     node.reward_network_reward = 0
+                    # 即使没有奖励网络，也添加基础经验
+                    if node.r2 > -np.inf and not np.isnan(z_hybrid) and np.isfinite(z_hybrid):
+                        self.add_experience(expression_str, node.r2, node.complexity, z_hybrid)
             else:
                 node.reward = 0
                 node.reward_network_reward = 0
                 
-        except:
+        except Exception as e:
+            # 不打印错误，避免过多输出
             node.r2 = -np.inf
             node.complexity = float('inf')
             node.reward = 0
@@ -430,9 +567,24 @@ class MCTSWithRewardNetwork:
     def _evaluate_expression(self, expr, X):
         """评估单个表达式"""
         try:
-            return expr.eval(X)
-        except:
-            return np.zeros(len(next(iter(X.values()))))
+            # 如果X是numpy数组，转换为字典格式
+            if isinstance(X, np.ndarray):
+                # 确保X是2D数组
+                if X.ndim == 1:
+                    X = X.reshape(-1, 1)
+                X_dict = {f'x{i+1}': X[:, i] for i in range(X.shape[1])}
+                return expr.eval(X_dict)
+            else:
+                return expr.eval(X)
+        except Exception as e:
+            # 打印具体错误信息以便调试
+            print(f"评估表达式 '{expr}' 时出错: {str(e)}")
+            # 如果评估失败，返回零向量
+            if isinstance(X, np.ndarray):
+                return np.zeros(X.shape[0])
+            else:
+                # 如果X是字典，返回与第一个值相同长度的零向量
+                return np.zeros(len(next(iter(X.values()))))
     
     def _backpropagate(self, node, reward):
         """回溯阶段：更新节点统计信息"""

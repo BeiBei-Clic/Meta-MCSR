@@ -108,19 +108,34 @@ class MCTSWithRewardNetwork:
         print(f"设置神谕目标: {true_expression}")
     
     def compute_hybrid_reward(self, expression_str, r2_score, complexity):
-        """计算混合奖励"""
-        # 性能分量
+        """计算混合奖励（双网络协作）"""
+        # 性能分量（来自奖励网络的潜力预测）
         r2_clipped = max(0, min(1, r2_score))  # 限制在[0,1]范围
         z_perf = 1.0 / (1.0 + np.exp(-10 * (r2_clipped - 0.5)))  # Sigmoid函数
         
-        # 结构分量
+        # 结构分量（表达式嵌入与真实解的相似度）
         if self.oracle_target is not None and self.reward_network is not None:
             self.reward_network.eval()
             with torch.no_grad():
                 try:
+                    # 编码当前表达式
                     expr_embedding = self.reward_network.expression_embedding.encode_expressions([expression_str])
-                    expr_tensor = torch.FloatTensor(expr_embedding)
-                    z_struct = torch.cosine_similarity(expr_tensor, self.oracle_target).item()
+                    expr_tensor = torch.FloatTensor(expr_embedding).to(self.reward_network.expression_embedding.device)
+                    
+                    # 确保张量维度正确
+                    if expr_tensor.dim() == 1:
+                        expr_tensor = expr_tensor.unsqueeze(0)
+                    if self.oracle_target.dim() == 1:
+                        oracle_target = self.oracle_target.unsqueeze(0)
+                    else:
+                        oracle_target = self.oracle_target
+                    
+                    # 计算余弦相似度
+                    z_struct = torch.cosine_similarity(expr_tensor, oracle_target).item()
+                    
+                    # 确保相似度在[0,1]范围
+                    z_struct = (z_struct + 1) / 2  # 从[-1,1]映射到[0,1]
+                    
                 except Exception as e:
                     # 如果计算失败，使用复杂度惩罚
                     complexity_penalty = np.exp(-complexity / 100)
@@ -130,13 +145,14 @@ class MCTSWithRewardNetwork:
             complexity_penalty = np.exp(-complexity / 100)  # 复杂度越高奖励越低
             z_struct = complexity_penalty
         
-        # 混合奖励
+        # 混合奖励：β * R_pot + (1-β) * S_struct
+        # 使用超参数beta（在初始化时设置，默认0.7）
         z_hybrid = self.alpha_hybrid * z_perf + (1 - self.alpha_hybrid) * z_struct
         
         return z_hybrid, z_perf, z_struct
     
     def evaluate_with_reward_network(self, expression_str):
-        """使用奖励网络评估表达式"""
+        """使用奖励网络评估表达式（预测潜力）"""
         if self.reward_network is None:
             raise ValueError("奖励网络未设置")
         
@@ -176,7 +192,7 @@ class MCTSWithRewardNetwork:
         device = self.reward_network.expression_embedding.device
         X_repr = X_repr.to(device)
         
-        # 使用奖励网络预测奖励
+        # 使用奖励网络预测奖励（潜力）
         try:
             reward_network_reward = self.reward_network.predict_reward(expression_str, X_repr)
             # 确保返回的是标量

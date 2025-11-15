@@ -102,19 +102,26 @@ class DataGenerator:
 class RewardNetworkTrainingManager:
     """增强的奖励网络训练管理器，支持MCTS数据生成和嵌入器微调"""
     
-    def __init__(self, expression_encoder_path, max_epochs=5, batch_size=16,  # 进一步减小训练轮次和批次大小
-                 learning_rate=1e-4, mcts_iterations=20, experience_buffer_size=1000):  # 进一步减小MCTS迭代次数和经验池大小
+    def __init__(self, expression_encoder_path, max_epochs=5, batch_size=16,
+                 reward_lr=1e-4, encoder_lr=1e-5, mcts_iterations=20, experience_buffer_size=1000):
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.max_epochs = max_epochs
         self.batch_size = batch_size
-        self.learning_rate = learning_rate
+        self.reward_lr = reward_lr  # 奖励网络学习率（正常）
+        self.encoder_lr = encoder_lr  # 表达式编码器学习率（低）
         self.mcts_iterations = mcts_iterations
         self.experience_buffer_size = experience_buffer_size
         
         # 初始化组件
         self.reward_network = None
-        self.trainer = None
         self.expression_encoder_path = expression_encoder_path
+        
+        # 优化器
+        self.reward_optimizer = None  # 奖励网络优化器
+        self.encoder_optimizer = None  # 表达式编码器优化器
+        
+        # 损失函数
+        self.criterion = nn.MSELoss()
         
         # 经验回放池
         self.experience_buffer = ExperienceReplayBuffer(max_size=experience_buffer_size)
@@ -137,14 +144,30 @@ class RewardNetworkTrainingManager:
         # 设置数据编码器维度
         self.reward_network.set_data_encoder_dim(data_encoder_dims)
         
-        # 创建训练器
-        self.trainer = RewardNetworkTrainer(
-            self.reward_network,
-            lr=self.learning_rate,
+        # 创建两个优化器：一个用于奖励网络，一个用于表达式编码器
+        # 奖励网络优化器（正常学习率）
+        reward_network_params = [
+            {'params': self.reward_network.data_encoder.parameters()},
+            {'params': self.reward_network.fusion.parameters()},
+            {'params': self.reward_network.reward_head.parameters()}
+        ]
+        
+        self.reward_optimizer = torch.optim.Adam(
+            reward_network_params,
+            lr=self.reward_lr,
+            weight_decay=1e-5
+        )
+        
+        # 表达式编码器优化器（低学习率微调）
+        self.encoder_optimizer = torch.optim.Adam(
+            self.reward_network.expression_embedding.model.parameters(),
+            lr=self.encoder_lr,
             weight_decay=1e-5
         )
         
         print(f"奖励网络已初始化，设备: {self.device}")
+        print(f"奖励网络学习率: {self.reward_lr}")
+        print(f"表达式编码器学习率: {self.encoder_lr}")
     
     def generate_training_data_with_mcts(self, datasets, num_epochs_per_dataset=2):
         """使用MCTS生成训练数据"""
@@ -195,24 +218,23 @@ class RewardNetworkTrainingManager:
             print(f"数据集 {dataset_idx + 1} 完成，总经验: {len(self.experience_buffer)}")
     
     def train_reward_network(self):
-        """训练奖励网络"""
+        """训练奖励网络（分离式训练）"""
         print("\n开始训练奖励网络...")
-        
-        
         
         if len(self.experience_buffer) == 0:
             print("错误：经验池为空，无法训练")
             return
         
         best_val_loss = float('inf')
-        patience = 3  # 减小早停耐心值
+        patience = 3
         patience_counter = 0
         
         for epoch in range(self.max_epochs):
             print(f"\nEpoch {epoch + 1}/{self.max_epochs}")
             print("-" * 50)
             
-            # 训练
+            # 阶段1：训练奖励网络（冻结表达式编码器）
+            print("阶段1：训练奖励网络...")
             train_losses = []
             num_batches = 0
             
@@ -226,9 +248,38 @@ class RewardNetworkTrainingManager:
                     if X_batch.dim() == 1:
                         X_batch = X_batch.unsqueeze(-1)
                     
-                    # 训练一步
-                    loss = self.trainer.train_step(expressions, X_batch, target_rewards)
-                    train_losses.append(loss)
+                    # 前向传播（冻结表达式编码器）
+                    self.reward_network.train()
+                    self.reward_optimizer.zero_grad()
+                    
+                    # 使用当前表达式编码器（不计算梯度）
+                    with torch.no_grad():
+                        expr_embeddings = self.reward_network.expression_embedding.encode_expressions(expressions)
+                        expr_tensor = torch.FloatTensor(expr_embeddings).to(self.device)
+                    
+                    # 编码数据
+                    data_encoded = self.reward_network.data_encoder(X_batch.to(self.device))
+                    
+                    # 融合
+                    fused = self.reward_network.fusion(expr_tensor, data_encoded)
+                    
+                    # 预测奖励
+                    predicted_rewards = self.reward_network.reward_head(fused)
+                    
+                    # 计算损失
+                    loss = self.criterion(predicted_rewards, target_rewards.to(self.device))
+                    
+                    # 反向传播（仅奖励网络）
+                    loss.backward()
+                    torch.nn.utils.clip_grad_norm_(
+                        list(self.reward_network.data_encoder.parameters()) +
+                        list(self.reward_network.fusion.parameters()) +
+                        list(self.reward_network.reward_head.parameters()),
+                        max_norm=1.0
+                    )
+                    self.reward_optimizer.step()
+                    
+                    train_losses.append(loss.item())
                     num_batches += 1
                     
                     if batch_idx % (self.batch_size * 5) == 0:
@@ -239,10 +290,59 @@ class RewardNetworkTrainingManager:
                     continue
             
             avg_train_loss = np.mean(train_losses) if train_losses else float('inf')
-            print(f"平均训练损失: {avg_train_loss:.4f}")
+            print(f"奖励网络训练损失: {avg_train_loss:.4f}")
+            
+            # 阶段2：微调表达式编码器（低学习率）
+            print("阶段2：微调表达式编码器...")
+            encoder_losses = []
+            
+            for batch_idx in range(0, len(self.experience_buffer), self.batch_size):
+                batch_size = min(self.batch_size, len(self.experience_buffer) - batch_idx)
+                
+                try:
+                    expressions, X_batch, target_rewards = self.experience_buffer.sample(batch_size)
+                    
+                    # 确保张量维度正确
+                    if X_batch.dim() == 1:
+                        X_batch = X_batch.unsqueeze(-1)
+                    
+                    # 前向传播（仅表达式编码器）
+                    self.reward_network.expression_embedding.model.train()
+                    self.encoder_optimizer.zero_grad()
+                    
+                    # 编码表达式（计算梯度）
+                    expr_embeddings = self.reward_network.expression_embedding.encode_expressions(expressions)
+                    expr_tensor = torch.FloatTensor(expr_embeddings).to(self.device)
+                    expr_tensor.requires_grad_(True)
+                    
+                    # 冻结奖励网络部分
+                    with torch.no_grad():
+                        data_encoded = self.reward_network.data_encoder(X_batch.to(self.device))
+                        fused = self.reward_network.fusion(expr_tensor, data_encoded)
+                        predicted_rewards = self.reward_network.reward_head(fused)
+                    
+                    # 计算损失
+                    loss = self.criterion(predicted_rewards, target_rewards.to(self.device))
+                    
+                    # 反向传播（仅表达式编码器）
+                    loss.backward()
+                    torch.nn.utils.clip_grad_norm_(
+                        self.reward_network.expression_embedding.model.parameters(),
+                        max_norm=1.0
+                    )
+                    self.encoder_optimizer.step()
+                    
+                    encoder_losses.append(loss.item())
+                    
+                except Exception as e:
+                    continue
+            
+            avg_encoder_loss = np.mean(encoder_losses) if encoder_losses else float('inf')
+            print(f"编码器微调损失: {avg_encoder_loss:.4f}")
             
             # 记录历史
             self.training_history['train_loss'].append(avg_train_loss)
+            self.training_history['encoder_loss'].append(avg_encoder_loss)
             
             # 早停检查
             if avg_train_loss < best_val_loss:

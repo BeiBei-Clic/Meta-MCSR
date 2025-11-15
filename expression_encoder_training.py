@@ -93,35 +93,30 @@ class ExpressionGenerator:
         return expressions
 
 
-class MaskedLanguageModel(nn.Module):
-    """掩码语言模型，用于预训练表达式嵌入器"""
+class TripletLossModel(nn.Module):
+    """三元组损失模型，用于对比学习表达式嵌入器"""
     
-    def __init__(self, encoder, vocab_size, d_model):
+    def __init__(self, encoder, margin=0.5):
         super().__init__()
         self.encoder = encoder
-        self.mlm_head = nn.Linear(d_model, vocab_size)
+        self.margin = margin
         
-    def forward(self, token_ids, attention_mask=None, masked_indices=None):
+    def forward(self, anchor_ids, positive_ids, negative_ids, 
+                anchor_mask=None, positive_mask=None, negative_mask=None):
         """前向传播"""
-        # 获取序列级别的嵌入
-        sequence_embeddings = self.encoder(token_ids, attention_mask, return_sequence=True)
+        # 编码anchor、positive和negative
+        anchor_emb = self.encoder(anchor_ids, anchor_mask)
+        positive_emb = self.encoder(positive_ids, positive_mask)
+        negative_emb = self.encoder(negative_ids, negative_mask)
         
-        # 应用MLM头部
-        predictions = self.mlm_head(sequence_embeddings)
-        
-        if masked_indices is not None:
-            # 只返回masked位置的预测
-            masked_predictions = predictions[masked_indices]
-            return masked_predictions
-        
-        return predictions
+        return anchor_emb, positive_emb, negative_emb
 
 
 class ExpressionPreTrainer:
-    """表达式嵌入器预训练器"""
+    """表达式嵌入器预训练器（使用三元组损失）"""
     
     def __init__(self, d_model=256, nhead=8, num_layers=6, 
-                 batch_size=32, learning_rate=1e-4, max_seq_length=128):
+                 batch_size=32, learning_rate=1e-4, max_seq_length=128, margin=0.5):
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.d_model = d_model
         self.nhead = nhead
@@ -129,15 +124,16 @@ class ExpressionPreTrainer:
         self.batch_size = batch_size
         self.learning_rate = learning_rate
         self.max_seq_length = max_seq_length
+        self.margin = margin
         
         # 创建嵌入器和分词器
         self.embedding = ExpressionEmbedding()
         self.tokenizer = ExpressionTokenizer()
         
         # 预训练模型
-        self.mlm_model = None
+        self.triplet_model = None
         self.optimizer = None
-        self.criterion = nn.CrossEntropyLoss()
+        self.criterion = nn.TripletMarginLoss(margin=margin, p=2)
         
     def prepare_training_data(self, expressions):
         """准备训练数据"""
@@ -149,154 +145,162 @@ class ExpressionPreTrainer:
         self.embedding.tokenizer = self.tokenizer
         self.embedding.create_model(d_model=self.d_model, nhead=self.nhead, num_layers=self.num_layers)
         
-        # 创建MLM模型
-        self.mlm_model = MaskedLanguageModel(
+        # 创建三元组损失模型
+        self.triplet_model = TripletLossModel(
             self.embedding.model, 
-            self.tokenizer.vocab_size, 
-            self.d_model
+            margin=self.margin
         ).to(self.device)
         
         self.optimizer = torch.optim.Adam(
-            self.mlm_model.parameters(), 
+            self.triplet_model.parameters(), 
             lr=self.learning_rate
         )
         
-    def create_masked_data(self, token_ids_list):
-        """创建掩码数据"""
-        masked_token_ids = []
-        masked_indices = []
-        attention_masks = []
+    def generate_triplets(self, expressions):
+        """生成三元组数据 (anchor, positive, negative)"""
+        triplets = []
         
-        # 找到批次中最长的序列长度
-        max_seq_len = max(len(ids) for ids in token_ids_list)
+        for i, anchor_expr in enumerate(expressions):
+            # 正样本：相同或相似的表达式
+            # 这里简化处理：使用相同的表达式作为正样本
+            # 实际应用中可以生成简化版本或代数变换版本
+            if i + 1 < len(expressions):
+                positive_expr = expressions[i + 1]
+            else:
+                positive_expr = anchor_expr
+            
+            # 负样本：随机选择不同的表达式
+            neg_idx = random.randint(0, len(expressions) - 1)
+            while neg_idx == i:
+                neg_idx = random.randint(0, len(expressions) - 1)
+            negative_expr = expressions[neg_idx]
+            
+            triplets.append((anchor_expr, positive_expr, negative_expr))
         
-        for batch_idx, token_ids in enumerate(token_ids_list):
-            masked_batch = token_ids.copy()
-            
-            # 随机选择15%的token进行掩码
-            mask_ratio = 0.15
-            seq_len = len(token_ids)
-            num_masks = max(1, int(seq_len * mask_ratio))
-            
-            # 选择要掩码的位置（不包括特殊token）
-            valid_positions = [i for i in range(1, seq_len - 1) 
-                             if token_ids[i] not in [self.tokenizer.token_to_id['<SOS>'], 
-                                                   self.tokenizer.token_to_id['<EOS>'], 
-                                                   self.tokenizer.token_to_id['<PAD>']]]
-            
-            if len(valid_positions) > 0:
-                masked_positions = random.sample(valid_positions, min(num_masks, len(valid_positions)))
-                
-                for pos in masked_positions:
-                    original_token = token_ids[pos]
-                    # 80%概率替换为MASK，10%概率替换为随机token，10%概率保持不变
-                    rand = random.random()
-                    if rand < 0.8:
-                        masked_batch[pos] = self.tokenizer.token_to_id['<MASK>']
-                        # 记录被掩码的位置（确保位置在有效范围内）
-                        if pos < max_seq_len:  # 确保位置不超过批次中最长序列长度
-                            masked_indices.append((batch_idx, pos))
-                    elif rand < 0.9:
-                        masked_batch[pos] = random.randint(1, self.tokenizer.vocab_size - 4)  # 排除特殊token
-                        # 记录被掩码的位置（确保位置在有效范围内）
-                        if pos < max_seq_len:  # 确保位置不超过批次中最长序列长度
-                            masked_indices.append((batch_idx, pos))
-                    # else: 保持不变，不记录
-            
-            masked_token_ids.append(masked_batch)
-            attention_masks.append([True] * len(masked_batch))
-        
-        return masked_token_ids, attention_masks, masked_indices
+        return triplets
     
     def train_epoch(self, expressions, epoch):
-        """训练一个epoch"""
-        self.mlm_model.train()
+        """训练一个epoch（使用三元组损失）"""
+        self.triplet_model.train()
         total_loss = 0
         
-        # 随机打乱表达式
-        random.shuffle(expressions)
+        # 生成三元组
+        triplets = self.generate_triplets(expressions)
+        
+        # 随机打乱
+        random.shuffle(triplets)
         
         # 分批处理
-        for i in range(0, len(expressions), self.batch_size):
-            batch_exprs = expressions[i:i + self.batch_size]
+        num_batches = 0
+        for i in range(0, len(triplets), self.batch_size):
+            batch_triplets = triplets[i:i + self.batch_size]
             
             # Token化
-            token_ids_list = []
-            for expr in batch_exprs:
-                token_ids = self.tokenizer.encode(expr, self.max_seq_length)
-                token_ids_list.append(token_ids)
+            anchor_ids_list = []
+            positive_ids_list = []
+            negative_ids_list = []
+            anchor_masks = []
+            positive_masks = []
+            negative_masks = []
             
-            # 创建掩码数据
-            masked_token_ids, attention_masks, masked_indices = self.create_masked_data(token_ids_list)
+            for anchor, positive, negative in batch_triplets:
+                # Anchor
+                anchor_ids = self.tokenizer.encode(anchor, self.max_seq_length)
+                anchor_ids_list.append(anchor_ids)
+                anchor_masks.append([True] * len(anchor_ids))
+                
+                # Positive
+                positive_ids = self.tokenizer.encode(positive, self.max_seq_length)
+                positive_ids_list.append(positive_ids)
+                positive_masks.append([True] * len(positive_ids))
+                
+                # Negative
+                negative_ids = self.tokenizer.encode(negative, self.max_seq_length)
+                negative_ids_list.append(negative_ids)
+                negative_masks.append([True] * len(negative_ids))
             
             # 转换为tensor
-            input_ids = torch.tensor(masked_token_ids, device=self.device)
-            attention_mask = torch.tensor(attention_masks, device=self.device)
+            anchor_tensor = torch.tensor(anchor_ids_list, device=self.device)
+            positive_tensor = torch.tensor(positive_ids_list, device=self.device)
+            negative_tensor = torch.tensor(negative_ids_list, device=self.device)
+            
+            anchor_mask_tensor = torch.tensor(anchor_masks, device=self.device)
+            positive_mask_tensor = torch.tensor(positive_masks, device=self.device)
+            negative_mask_tensor = torch.tensor(negative_masks, device=self.device)
             
             # 前向传播
             self.optimizer.zero_grad()
-            outputs = self.mlm_model(input_ids, attention_mask)
+            anchor_emb, positive_emb, negative_emb = self.triplet_model(
+                anchor_tensor, positive_tensor, negative_tensor,
+                anchor_mask_tensor, positive_mask_tensor, negative_mask_tensor
+            )
             
-            # 计算损失
-            if len(masked_indices) > 0:
-                # 提取被掩码位置的预测和真实标签
-                batch_indices = [idx[0] for idx in masked_indices]
-                pos_indices = [idx[1] for idx in masked_indices]
-                
-                # 提取被掩码位置的预测结果
-                masked_outputs = outputs[batch_indices, pos_indices]
-                masked_input_ids = torch.tensor([token_ids_list[idx[0]][idx[1]] for idx in masked_indices], device=self.device)
-                
-                loss = self.criterion(masked_outputs, masked_input_ids)
-            else:
-                # 如果没有掩码位置，跳过这个批次
-                continue
+            # 计算三元组损失
+            loss = self.criterion(anchor_emb, positive_emb, negative_emb)
             
             # 反向传播
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(self.mlm_model.parameters(), max_norm=1.0)
+            torch.nn.utils.clip_grad_norm_(self.triplet_model.parameters(), max_norm=1.0)
             self.optimizer.step()
             
             total_loss += loss.item()
+            num_batches += 1
             
             if i % (self.batch_size * 10) == 0:
                 print(f"Epoch {epoch}, Batch {i//self.batch_size}, Loss: {loss.item():.4f}")
         
-        return total_loss / (len(expressions) // self.batch_size)
+        return total_loss / num_batches if num_batches > 0 else 0
     
     def validate(self, expressions):
-        """验证模型"""
-        self.mlm_model.eval()
+        """验证模型（使用三元组损失）"""
+        self.triplet_model.eval()
         total_loss = 0
         valid_batches = 0
         
+        # 生成三元组
+        triplets = self.generate_triplets(expressions)
+        
         with torch.no_grad():
-            for i in range(0, len(expressions), self.batch_size):
-                batch_exprs = expressions[i:i + self.batch_size]
+            for i in range(0, len(triplets), self.batch_size):
+                batch_triplets = triplets[i:i + self.batch_size]
                 
-                token_ids_list = []
-                for expr in batch_exprs:
-                    token_ids = self.tokenizer.encode(expr, self.max_seq_length)
-                    token_ids_list.append(token_ids)
+                # Token化
+                anchor_ids_list = []
+                positive_ids_list = []
+                negative_ids_list = []
+                anchor_masks = []
+                positive_masks = []
+                negative_masks = []
                 
-                masked_token_ids, attention_masks, masked_indices = self.create_masked_data(token_ids_list)
-                
-                input_ids = torch.tensor(masked_token_ids, device=self.device)
-                attention_mask = torch.tensor(attention_masks, device=self.device)
-                
-                outputs = self.mlm_model(input_ids, attention_mask)
-                
-                if len(masked_indices) > 0:
-                    batch_indices = [idx[0] for idx in masked_indices]
-                    pos_indices = [idx[1] for idx in masked_indices]
+                for anchor, positive, negative in batch_triplets:
+                    anchor_ids = self.tokenizer.encode(anchor, self.max_seq_length)
+                    anchor_ids_list.append(anchor_ids)
+                    anchor_masks.append([True] * len(anchor_ids))
                     
-                    # 提取被掩码位置的预测结果
-                    masked_outputs = outputs[batch_indices, pos_indices]
-                    masked_input_ids = torch.tensor([token_ids_list[idx[0]][idx[1]] for idx in masked_indices], device=self.device)
+                    positive_ids = self.tokenizer.encode(positive, self.max_seq_length)
+                    positive_ids_list.append(positive_ids)
+                    positive_masks.append([True] * len(positive_ids))
                     
-                    loss = self.criterion(masked_outputs, masked_input_ids)
-                    total_loss += loss.item()
-                    valid_batches += 1
+                    negative_ids = self.tokenizer.encode(negative, self.max_seq_length)
+                    negative_ids_list.append(negative_ids)
+                    negative_masks.append([True] * len(negative_ids))
+                
+                anchor_tensor = torch.tensor(anchor_ids_list, device=self.device)
+                positive_tensor = torch.tensor(positive_ids_list, device=self.device)
+                negative_tensor = torch.tensor(negative_ids_list, device=self.device)
+                
+                anchor_mask_tensor = torch.tensor(anchor_masks, device=self.device)
+                positive_mask_tensor = torch.tensor(positive_masks, device=self.device)
+                negative_mask_tensor = torch.tensor(negative_masks, device=self.device)
+                
+                anchor_emb, positive_emb, negative_emb = self.triplet_model(
+                    anchor_tensor, positive_tensor, negative_tensor,
+                    anchor_mask_tensor, positive_mask_tensor, negative_mask_tensor
+                )
+                
+                loss = self.criterion(anchor_emb, positive_emb, negative_emb)
+                total_loss += loss.item()
+                valid_batches += 1
         
         return total_loss / valid_batches if valid_batches > 0 else 0
     

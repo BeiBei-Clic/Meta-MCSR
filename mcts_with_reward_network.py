@@ -297,15 +297,6 @@ def main():
         print(f"真实解: {problem['true_expression']}")
         print(f"R2: {r2_true:.4f}")
         print(f"RMSE: {rmse_true:.4f}")
-        
-        # 性能对比
-        print(f"\n性能对比")
-        print("-" * 30)
-        print(f"增强MCTS R2: {result['r2_score']:.4f}")
-        print(f"真实解   R2: {r2_true:.4f}")
-        
-        difference = result['r2_score'] - r2_true
-        print(f"与真实解差距: {abs(difference):.4f}")
     
     def run_dataset_file_test():
         """运行指定数据集文件测试"""

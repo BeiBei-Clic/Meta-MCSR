@@ -516,15 +516,6 @@ def main():
             print(f"测试集 RMSE: {result['test_rmse_score']:.4f}")
             print(f"训练时间: {result['training_time']:.2f}s")
             
-            # 检查过拟合
-            overfitting_gap = result['train_r2_score'] - result['test_r2_score']
-            if overfitting_gap > 0.1:
-                print(f"\n注意：可能存在过拟合 (训练-测试R2差值: {overfitting_gap:.4f})")
-            elif overfitting_gap < -0.05:
-                print(f"\n注意：可能存在欠拟合 (训练-测试R2差值: {overfitting_gap:.4f})")
-            else:
-                print(f"\n模型泛化性能: 良好 (训练-测试R2差值: {overfitting_gap:.4f})")
-            
             # 保存实验结果
             save_experiment_results(
                 args=args,

@@ -156,8 +156,7 @@ class ExpressionGenerator:
         for i in range(super_count):
             if i % 10000 == 0:
                 print(f"超复杂表达式进度: {i:,}/{super_count:,}")
-            max_depth_for_super = max(5, self.max_depth)
-            depth = random.randint(5, max_depth_for_super) if max_depth_for_super >= 5 else self.max_depth
+            depth = random.randint(5, self.max_depth)
             expr = self._generate_recursive(depth, allow_special=True)
             expressions.append(str(expr))
         
@@ -225,18 +224,6 @@ class TripletLossModel(nn.Module):
     def forward(self, anchor_ids, positive_ids, negative_ids, 
                 anchor_mask=None, positive_mask=None, negative_mask=None):
         """前向传播"""
-        # 确保所有输入都在正确的设备上
-        # 使用输入tensor的设备信息而不是参数，避免DataParallel的StopIteration错误
-        current_device = anchor_ids.device
-        anchor_ids = anchor_ids.to(current_device)
-        positive_ids = positive_ids.to(current_device)
-        negative_ids = negative_ids.to(current_device)
-        
-        if anchor_mask is not None:
-            anchor_mask = anchor_mask.to(current_device)
-            positive_mask = positive_mask.to(current_device) 
-            negative_mask = negative_mask.to(current_device)
-        
         # 编码anchor、positive和negative
         anchor_emb = self.encoder(anchor_ids, anchor_mask)
         positive_emb = self.encoder(positive_ids, positive_mask)
@@ -271,11 +258,7 @@ class ExpressionPreTrainer:
         
         # 多GPU时自动调整batch_size
         if self.num_gpus > 1:
-            # 使用更小的per-GPU batch_size，但总batch_size更大
-            effective_batch_size = batch_size * self.num_gpus
-            # 确保effective batch_size不会太大
-            self.batch_size = min(effective_batch_size, 512)  # 设置上限
-            print(f"多GPU优化: 原始batch_size={batch_size}, 调整后batch_size={self.batch_size}")
+            self.batch_size = min(batch_size * self.num_gpus, 512)
         else:
             self.batch_size = batch_size
             
@@ -398,16 +381,6 @@ class ExpressionPreTrainer:
         # 分批处理
         num_batches = 0
         
-        # 显示GPU信息
-        if epoch == 1:
-            if self.num_gpus > 1:
-                print(f"🚀 多GPU训练模式:")
-                print(f"  - GPU数量: {self.num_gpus}")
-                print(f"  - 每个GPU的batch_size: {self.batch_size // self.num_gpus}")
-                print(f"  - 总batch_size: {self.batch_size}")
-            else:
-                print("📱 单GPU训练模式")
-        
         for i in range(0, len(triplets), self.batch_size):
             batch_triplets = triplets[i:i + self.batch_size]
             
@@ -475,7 +448,6 @@ class ExpressionPreTrainer:
         """验证模型（使用三元组损失）"""
         self.triplet_model.eval()
         total_loss = 0
-        valid_batches = 0
         
         # 生成三元组
         triplets = self.generate_triplets(expressions)
@@ -520,9 +492,8 @@ class ExpressionPreTrainer:
                 
                 loss = self.criterion(anchor_emb, positive_emb, negative_emb)
                 total_loss += loss.item()
-                valid_batches += 1
         
-        return total_loss / valid_batches if valid_batches > 0 else 0
+        return total_loss / (len(triplets) // self.batch_size)
     
     def train(self, train_expressions, val_expressions=None, num_epochs=50, save_path='weights/expression_encoder'):
         """训练模型"""
@@ -592,8 +563,7 @@ def main():
         else:
             print("📱 单GPU模式")
         
-        # 清理GPU缓存
-        torch.cuda.empty_cache()
+        
     
     # 创建表达式生成器
     generator = ExpressionGenerator(max_depth=8, max_variables=6)
@@ -627,10 +597,6 @@ def main():
     print("运行测试epoch...")
     test_loss = test_trainer.train_epoch(test_train_expressions, 1)
     print(f"测试epoch完成，平均损失: {test_loss:.4f}")
-    
-    if test_loss > 10.0:  # 如果损失异常高
-        print("警告：测试损失过高，可能存在数值稳定性问题")
-        return
     
     print("✅ 小规模测试通过！")
     
@@ -679,10 +645,7 @@ def main():
     print(f"  - 学习率: {trainer.learning_rate:.2e}")
     
     if trainer.num_gpus > 1:
-        print(f"🚀 多GPU训练配置:")
-        print(f"  - GPU数量: {trainer.num_gpus}")
-        print(f"  - 每个GPU的batch_size: {trainer.batch_size // trainer.num_gpus}")
-        print(f"  - 理论加速比: ~{trainer.num_gpus}x")
+        print(f"🚀 多GPU训练配置: {trainer.num_gpus}个GPU")
     else:
         print(f"📱 单GPU训练")
     

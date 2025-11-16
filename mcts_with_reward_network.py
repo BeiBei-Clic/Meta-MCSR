@@ -10,6 +10,7 @@ Meta-MCSR: 基于自学习奖励网络的符号回归系统
 import sys
 import os
 import argparse
+import datetime
 
 def print_help():
     """打印帮助信息"""
@@ -48,6 +49,60 @@ Meta-MCSR: 基于自学习奖励网络的符号回归系统
     - 最后一列为标签y，前面为输入特征
     - 自动检测并处理，无需额外转换
 """)
+
+def save_experiment_results(args, problem_name, dataset_name, result, use_reward_network=True, extra_info=None):
+    """保存实验结果到txt文件"""
+    # 创建result文件夹（如果不存在）
+    result_dir = "result"
+    if not os.path.exists(result_dir):
+        os.makedirs(result_dir)
+    
+    # 生成文件名：基于时间和模式
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    dataset_base = os.path.splitext(os.path.basename(args.dataset_path))[0]
+    filename = f"{dataset_base}_{timestamp}.txt"
+    
+    filepath = os.path.join(result_dir, filename)
+    
+    try:
+        with open(filepath, 'w', encoding='utf-8') as f:
+            # 基本实验信息
+            f.write(f"实验时间: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+            f.write(f"实验模式: {args.mode}\n")
+            if args.mode == 'dataset-file':
+                f.write(f"数据集路径: {args.dataset_path}\n")
+            f.write(f"使用奖励网络: {'是' if use_reward_network else '否'}\n")
+            f.write(f"数据集名称: {dataset_name}\n")
+            f.write(f"问题名称: {problem_name}\n\n")
+            
+            # 超参数设置
+            f.write("实验参数设置:\n")
+            f.write("-" * 30 + "\n")
+            f.write(f"最大迭代次数: {args.max_iterations}\n")
+            f.write(f"最大深度: {args.max_depth}\n")
+            f.write(f"训练/测试分割比例: {args.train_test_split}\n")
+            f.write(f"样本数量: {args.num_samples if args.num_samples else '使用全部数据'}\n")
+            f.write(f"使用奖励网络: {'是' if use_reward_network else '否'}\n")
+            f.write("\n")
+            
+            # 实验结果
+            f.write("实验结果:\n")
+            f.write("-" * 30 + "\n")
+            f.write(f"找到的解: {result['best_expression']}\n\n")
+            
+            f.write("性能指标:\n")
+            f.write(f"训练集 R² 分数: {result['train_r2_score']:.6f}\n")
+            f.write(f"训练集 RMSE: {result['train_rmse_score']:.6f}\n")
+            f.write(f"测试集 R² 分数: {result['test_r2_score']:.6f}\n")
+            f.write(f"测试集 RMSE: {result['test_rmse_score']:.6f}\n")
+            f.write(f"训练时间: {result['training_time']:.2f} 秒\n\n")
+            
+        print(f"\n实验结果已保存到: {filepath}")
+        return filepath
+        
+    except Exception as e:
+        print(f"\n警告：保存实验结果失败 - {e}")
+        return None
 
 def check_dependencies():
     """检查依赖是否满足"""
@@ -391,6 +446,17 @@ def main():
         print(f"真实解: {problem['true_expression']}")
         print(f"R2: {r2_true:.4f}")
         print(f"RMSE: {rmse_true:.4f}")
+        
+        # 保存实验结果
+        extra_info = f"真实解: {problem['true_expression']}\n真实解R2: {r2_true:.4f}\n真实解RMSE: {rmse_true:.4f}"
+        save_experiment_results(
+            args=args,
+            problem_name=problem['name'],
+            dataset_name="复合函数测试数据",
+            result=result,
+            use_reward_network=args.use_reward_network,
+            extra_info=extra_info
+        )
     
     def run_dataset_file_test():
         """运行指定数据集文件测试"""
@@ -450,25 +516,6 @@ def main():
             print(f"测试集 RMSE: {result['test_rmse_score']:.4f}")
             print(f"训练时间: {result['training_time']:.2f}s")
             
-            # 数据集统计信息
-            print(f"\n数据集统计信息")
-            print("-" * 30)
-            print(f"样本数: {X.shape[0]}")
-            print(f"特征数: {X.shape[1]}")
-            print(f"目标值范围: [{y.min():.4f}, {y.max():.4f}]")
-            print(f"目标值均值: {y.mean():.4f}")
-            print(f"目标值标准差: {y.std():.4f}")
-            
-            # 模型性能评估
-            if result['test_r2_score'] > 0.8:
-                print(f"\n模型拟合效果: 优秀 (测试集R2 > 0.8)")
-            elif result['test_r2_score'] > 0.6:
-                print(f"\n模型拟合效果: 良好 (测试集R2 > 0.6)")
-            elif result['test_r2_score'] > 0.4:
-                print(f"\n模型拟合效果: 一般 (测试集R2 > 0.4)")
-            else:
-                print(f"\n模型拟合效果: 较差 (测试集R2 ≤ 0.4)")
-            
             # 检查过拟合
             overfitting_gap = result['train_r2_score'] - result['test_r2_score']
             if overfitting_gap > 0.1:
@@ -477,6 +524,16 @@ def main():
                 print(f"\n注意：可能存在欠拟合 (训练-测试R2差值: {overfitting_gap:.4f})")
             else:
                 print(f"\n模型泛化性能: 良好 (训练-测试R2差值: {overfitting_gap:.4f})")
+            
+            # 保存实验结果
+            save_experiment_results(
+                args=args,
+                problem_name="自定义数据集符号回归",
+                dataset_name=dataset['name'],
+                result=result,
+                use_reward_network=args.use_reward_network,
+                extra_info=f"数据集描述: {dataset['description']}\n原始数据形状: {dataset['X'].shape}"
+            )
                 
         except Exception as e:
             print(f"错误：{e}")

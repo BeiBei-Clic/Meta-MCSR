@@ -11,6 +11,48 @@ import sys
 import os
 import argparse
 
+def print_help():
+    """打印帮助信息"""
+    print("""
+Meta-MCSR: 基于自学习奖励网络的符号回归系统
+
+用法:
+  python mcts_with_reward_network.py <模式> [选项]
+
+模式:
+  composite                 运行复合函数测试
+  dataset-file             指定数据集文件测试
+
+选项:
+  --dataset-path PATH      dataset-file模式下的数据集文件路径
+  --expr-encoder PATH      表达式编码器模型路径 (默认: weights/expression_encoder)
+  --reward-network PATH    奖励网络模型路径 (默认: weights/reward_network_final)
+  --max-iterations N       MCTS最大迭代次数 (默认: 500)
+  --max-depth N            MCTS最大深度 (默认: 8)
+  --train-test-split R     训练/测试集分割比例 (默认: 0.8)
+  --use-reward-network VALUE  是否使用奖励网络 (true=使用, false=不使用, 默认: true)
+  --no-use-reward-network    使用传统MCTS (不使用奖励网络)
+  --help, -h               显示此帮助信息
+
+示例:
+  python mcts_with_reward_network.py composite
+  python mcts_with_reward_network.py dataset-file --dataset-path data.npz
+  python mcts_with_reward_network.py composite --no-use-reward-network
+  python mcts_with_reward_network.py dataset-file --dataset-path dataset/Feynman_with_units/I.6.2 --use-reward-network false
+
+数据集文件格式:
+  1. NPZ格式 (推荐):
+     - 支持numpy .npz格式
+     - 必须包含'X'（输入数据）和'y'（输出数据）数组
+     - X的形状应该是 (n_samples, n_features)
+     - y的形状应该是 (n_samples,)
+  
+  2. 纯文本格式 (如费曼数据集):
+     - 每行空格分隔的浮点数
+     - 最后一列为标签y，前面为输入特征
+     - 自动检测并处理，无需额外转换
+""")
+
 def check_dependencies():
     """检查依赖是否满足"""
     missing_deps = []
@@ -137,81 +179,76 @@ def load_dataset_from_file(file_path):
 
 def main():
     """主函数"""
-    parser = argparse.ArgumentParser(
-        description="Meta-MCSR: 基于自学习奖励网络的符号回归系统",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-示例用法:
-  python mcts_with_reward_network.py composite                           # 运行复合函数测试
-  python mcts_with_reward_network.py dataset-file --dataset-path data.npz  # 运行NPZ格式数据集测试
-  python mcts_with_reward_network.py dataset-file --dataset-path dataset/Feynman_with_units/I.6.2  # 运行费曼数据集测试
-  python mcts_with_reward_network.py --help                              # 显示帮助信息
-
-数据集文件格式:
-  1. NPZ格式 (推荐):
-     - 支持numpy .npz格式
-     - 必须包含'X'（输入数据）和'y'（输出数据）数组
-     - X的形状应该是 (n_samples, n_features)
-     - y的形状应该是 (n_samples,)
-  
-  2. 纯文本格式 (如费曼数据集):
-     - 每行空格分隔的浮点数
-     - 最后一列为标签y，前面为输入特征
-     - 自动检测并处理，无需额外转换
-        """
-    )
+    # 检查命令行参数
+    use_reward_network = True  # 默认使用奖励网络
     
-    parser.add_argument(
-        'mode',
-        nargs='?',
-        choices=['composite', 'dataset-file'],
-        help='测试模式: composite (复合函数测试) 或 dataset-file (指定数据集文件测试)'
-    )
+    # 检查是否有--use-reward-network参数
+    if '--use-reward-network' in sys.argv:
+        # 找到该参数的索引并处理
+        try:
+            idx = sys.argv.index('--use-reward-network')
+            if idx + 1 < len(sys.argv):
+                value = sys.argv[idx + 1].lower()
+                use_reward_network = value in ['true', '1', 'yes', 'on']
+        except (ValueError, IndexError):
+            use_reward_network = True
+    elif '--no-use-reward-network' in sys.argv:
+        use_reward_network = False
     
-    parser.add_argument(
-        '--dataset-path',
-        help='dataset-file模式下的数据集文件路径 (numpy .npz格式，需要包含X和y数组)'
-    )
+    # 创建args对象
+    class Args:
+        def __init__(self):
+            self.mode = None
+            self.dataset_path = None
+            self.expr_encoder = 'weights/expression_encoder'
+            self.reward_network = 'weights/reward_network_final'
+            self.max_iterations = 500
+            self.max_depth = 8
+            self.train_test_split = 0.8
+            self.use_reward_network = use_reward_network
     
-    parser.add_argument(
-        '--expr-encoder',
-        default='weights/expression_encoder',
-        help='表达式编码器模型路径'
-    )
+    args = Args()
     
-    parser.add_argument(
-        '--reward-network',
-        default='weights/reward_network_final',
-        help='奖励网络模型路径'
-    )
+    # 解析位置参数
+    if len(sys.argv) > 1 and not sys.argv[1].startswith('-'):
+        if sys.argv[1] in ['composite', 'dataset-file']:
+            args.mode = sys.argv[1]
+        elif sys.argv[1] == '--help' or sys.argv[1] == '-h':
+            print_help()
+            return
     
-    parser.add_argument(
-        '--max-iterations',
-        type=int,
-        default=500,
-        help='MCTS最大迭代次数'
-    )
-    
-    parser.add_argument(
-        '--max-depth',
-        type=int,
-        default=8,
-        help='MCTS最大深度'
-    )
-    
-    parser.add_argument(
-        '--train-test-split',
-        type=float,
-        default=0.8,
-        help='训练/测试集分割比例 (默认0.8，即80%训练，20%测试)'
-    )
+    # 解析其他参数
+    i = 1
+    while i < len(sys.argv):
+        arg = sys.argv[i]
+        if arg == '--dataset-path' and i + 1 < len(sys.argv):
+            args.dataset_path = sys.argv[i + 1]
+            i += 2
+        elif arg == '--expr-encoder' and i + 1 < len(sys.argv):
+            args.expr_encoder = sys.argv[i + 1]
+            i += 2
+        elif arg == '--reward-network' and i + 1 < len(sys.argv):
+            args.reward_network = sys.argv[i + 1]
+            i += 2
+        elif arg == '--max-iterations' and i + 1 < len(sys.argv):
+            args.max_iterations = int(sys.argv[i + 1])
+            i += 2
+        elif arg == '--max-depth' and i + 1 < len(sys.argv):
+            args.max_depth = int(sys.argv[i + 1])
+            i += 2
+        elif arg == '--train-test-split' and i + 1 < len(sys.argv):
+            args.train_test_split = float(sys.argv[i + 1])
+            i += 2
+        elif arg == '--help' or arg == '-h':
+            print_help()
+            return
+        else:
+            i += 1
     
     # 如果没有提供参数，显示帮助
-    if len(sys.argv) == 1:
-        parser.print_help()
+    if len(sys.argv) == 1 or (len(sys.argv) == 2 and sys.argv[1] == '--help'):
+        print_help()
         return
-    
-    args = parser.parse_args()
     
     print("Meta-MCSR: 基于自学习奖励网络的符号回归系统")
     print("=" * 60)
@@ -289,21 +326,30 @@ def main():
         
         start_time = time.time()
         
-        # 创建奖励网络
-        reward_network = RewardNetwork(
-            expr_encoder_path=models.get('expr_encoder'),
-            fusion_type='attention'
-        )
-        
-        # 设置数据维度
-        input_dim = X.shape[1] if len(X.shape) > 1 else 1
-        reward_network.set_data_encoder_dim(input_dim)
-        
-        # 创建增强MCTS
-        mcts = MCTSWithRewardNetwork(
-            reward_network=reward_network,
-            **mcts_params
-        )
+        # 创建奖励网络（如果使用奖励网络模式）
+        if args.use_reward_network:
+            reward_network = RewardNetwork(
+                expr_encoder_path=models.get('expr_encoder'),
+                fusion_type='attention'
+            )
+            
+            # 设置数据维度
+            input_dim = X.shape[1] if len(X.shape) > 1 else 1
+            reward_network.set_data_encoder_dim(input_dim)
+            
+            # 创建增强MCTS
+            mcts = MCTSWithRewardNetwork(
+                reward_network=reward_network,
+                use_reward_network=True,
+                **mcts_params
+            )
+        else:
+            # 创建传统MCTS（不使用奖励网络）
+            mcts = MCTSWithRewardNetwork(
+                reward_network=None,
+                use_reward_network=False,
+                **mcts_params
+            )
         
         # 设置神谕目标
         if true_expression:
@@ -357,9 +403,13 @@ def main():
         X = problem['X']
         y = generate_noisy_data(problem['true_function'], X)
         
-        # 运行增强MCTS
-        print("\n使用增强MCTS（奖励网络）")
-        print("-" * 30)
+        # 运行MCTS
+        if args.use_reward_network:
+            print("\n使用增强MCTS（奖励网络）")
+            print("-" * 30)
+        else:
+            print("\n使用传统MCTS")
+            print("-" * 30)
         
         result = run_symbolic_regression(
             X, y,
@@ -413,8 +463,11 @@ def main():
             if X.shape[1] > 5:
                 print(f"警告：特征维度较高 ({X.shape[1]})，可能影响符号回归效果")
                 
-            # 运行增强MCTS
-            print("\n使用增强MCTS...")
+            # 运行MCTS
+            if args.use_reward_network:
+                print("\n使用增强MCTS（奖励网络增强）...")
+            else:
+                print("\n使用传统MCTS...")
             
             result = run_symbolic_regression(
                 X, y,

@@ -255,13 +255,19 @@ class ExpressionEmbedding:
         ).to(self.device)
         
         # 打印模型信息
-        param_count = self.model.get_parameter_count()
+        param_count = self.get_parameter_count()
         print(f"模型创建完成！参数量: {param_count:,} ({param_count / 1e6:.1f}M)")
         
-        # 启用多GPU训练
-        if torch.cuda.device_count() > 1:
-            print(f"检测到 {torch.cuda.device_count()} 个GPU，启用数据并行训练")
-            self.model = nn.DataParallel(self.model)
+        # 注意：不在这里启用DataParallel，由上层调用者处理多GPU包装
+    
+    def get_parameter_count(self):
+        """获取模型参数量（支持DataParallel）"""
+        if hasattr(self.model, 'module'):
+            return self.model.module.get_parameter_count()
+        elif hasattr(self.model, 'get_parameter_count'):
+            return self.model.get_parameter_count()
+        else:
+            return sum(p.numel() for p in self.model.parameters() if p.requires_grad)
     
     def load_model(self, model_path):
         """加载模型"""

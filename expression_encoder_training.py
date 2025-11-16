@@ -225,31 +225,74 @@ class TripletLossModel(nn.Module):
     def forward(self, anchor_ids, positive_ids, negative_ids, 
                 anchor_mask=None, positive_mask=None, negative_mask=None):
         """前向传播"""
+        # 确保所有输入都在正确的设备上
+        # 使用输入tensor的设备信息而不是参数，避免DataParallel的StopIteration错误
+        current_device = anchor_ids.device
+        anchor_ids = anchor_ids.to(current_device)
+        positive_ids = positive_ids.to(current_device)
+        negative_ids = negative_ids.to(current_device)
+        
+        if anchor_mask is not None:
+            anchor_mask = anchor_mask.to(current_device)
+            positive_mask = positive_mask.to(current_device) 
+            negative_mask = negative_mask.to(current_device)
+        
         # 编码anchor、positive和negative
         anchor_emb = self.encoder(anchor_ids, anchor_mask)
         positive_emb = self.encoder(positive_ids, positive_mask)
         negative_emb = self.encoder(negative_ids, negative_mask)
         
         return anchor_emb, positive_emb, negative_emb
+    
+    def get_parameter_count(self):
+        """获取总参数量"""
+        count = sum(p.numel() for p in self.parameters())
+        return count
 
 
 class ExpressionPreTrainer:
     """表达式嵌入器预训练器（使用三元组损失，支持100M参数模型和多GPU）"""
     
     def __init__(self, d_model=768, nhead=12, num_layers=12, 
-                 batch_size=64, learning_rate=1e-4, max_seq_length=128, margin=0.5):
+                 batch_size=64, learning_rate=1e-4, max_seq_length=128, margin=0.5,
+                 use_distributed=False, rank=0, world_size=1):
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.d_model = d_model
         self.nhead = nhead
         self.num_layers = num_layers
-        self.batch_size = batch_size
-        self.learning_rate = learning_rate
+        
+        # 分布式训练设置
+        self.use_distributed = use_distributed
+        self.rank = rank
+        self.world_size = world_size
+        
+        # 多GPU训练优化
+        self.num_gpus = torch.cuda.device_count()
+        
+        # 多GPU时自动调整batch_size
+        if self.num_gpus > 1:
+            # 使用更小的per-GPU batch_size，但总batch_size更大
+            effective_batch_size = batch_size * self.num_gpus
+            # 确保effective batch_size不会太大
+            self.batch_size = min(effective_batch_size, 512)  # 设置上限
+            print(f"多GPU优化: 原始batch_size={batch_size}, 调整后batch_size={self.batch_size}")
+        else:
+            self.batch_size = batch_size
+            
+        self.learning_rate = learning_rate * (1.0 if self.num_gpus == 0 else min(self.num_gpus, 4))  # 多GPU时适度增加学习率
         self.max_seq_length = max_seq_length
         self.margin = margin
         
-        # 多GPU设置 - 暂时禁用多GPU以避免设备不匹配问题
-        self.num_gpus = 1  # torch.cuda.device_count()
-        print(f"检测到 {torch.cuda.device_count()} 个GPU设备，但为避免设备问题暂时使用单GPU训练")
+        # 多GPU设置
+        self.num_gpus = torch.cuda.device_count()
+        print(f"检测到 {torch.cuda.device_count()} 个GPU设备")
+        
+        if self.num_gpus > 1:
+            print("✅ 启用多GPU数据并行训练")
+            print(f"  - GPU数量: {self.num_gpus}")
+            print(f"  - 设备ID: 0-{self.num_gpus-1}")
+        else:
+            print("单GPU训练模式")
         
         # 创建嵌入器和分词器
         self.embedding = ExpressionEmbedding()
@@ -259,7 +302,7 @@ class ExpressionPreTrainer:
         self.triplet_model = None
         self.optimizer = None
         self.criterion = nn.TripletMarginLoss(margin=margin, p=2)
-        self.scaler = torch.cuda.amp.GradScaler()  # 混合精度训练
+        self.scaler = torch.amp.GradScaler('cuda')  # 混合精度训练
         
     def prepare_training_data(self, expressions):
         """准备训练数据"""
@@ -271,28 +314,51 @@ class ExpressionPreTrainer:
         self.embedding.tokenizer = self.tokenizer
         self.embedding.create_model(d_model=self.d_model, nhead=self.nhead, num_layers=self.num_layers)
         
+        # 确保embedding模型在正确的设备上
+        self.embedding.model = self.embedding.model.to(self.device)
+        
         # 创建三元组损失模型
         self.triplet_model = TripletLossModel(
             self.embedding.model, 
             margin=self.margin
         ).to(self.device)
         
-        # 多GPU包装
-        if self.num_gpus > 1:
-            self.triplet_model = nn.DataParallel(self.triplet_model)
-            print(f"已启用多GPU数据并行训练，batch_size自动调整为 {self.batch_size * self.num_gpus}")
+        print(f"TripletLossModel移动到设备: {self.device}")
         
-        # 优化器 - 使用不同的学习率
+        # 多GPU/分布式训练包装
+        if self.use_distributed:
+            # 分布式数据并行
+            if not torch.distributed.is_initialized():
+                torch.distributed.init_process_group(backend='nccl', rank=self.rank, world_size=self.world_size)
+            
+            self.triplet_model = nn.parallel.DistributedDataParallel(
+                self.triplet_model,
+                device_ids=[self.rank],
+                output_device=self.rank,
+                find_unused_parameters=True
+            )
+            print(f"✅ 启用分布式训练 (rank {self.rank}/{self.world_size})")
+            
+        elif self.num_gpus > 1:
+            # 数据并行训练
+            device_ids = list(range(self.num_gpus))
+            self.triplet_model = nn.DataParallel(self.triplet_model, device_ids=device_ids)
+            print(f"✅ 启用数据并行训练，设备ID: {device_ids}")
+            print(f"  - 原始batch_size: {self.batch_size}")
+            print(f"  - 总batch_size (多GPU): {self.batch_size * self.num_gpus}")
+            
+            # 验证设备一致性
+            first_param_device = next(self.triplet_model.parameters()).device
+            print(f"  - 模型参数设备: {first_param_device}")
+        else:
+            print(f"单GPU训练，设备: {self.device}")
+        
+        # 优化器 - 使用AdamW for better training stability
         self.optimizer = torch.optim.AdamW(
             self.triplet_model.parameters(), 
             lr=self.learning_rate,
             weight_decay=0.01,
             betas=(0.9, 0.999)
-        )
-        
-        self.optimizer = torch.optim.Adam(
-            self.triplet_model.parameters(), 
-            lr=self.learning_rate
         )
         
     def generate_triplets(self, expressions):
@@ -331,6 +397,17 @@ class ExpressionPreTrainer:
         
         # 分批处理
         num_batches = 0
+        
+        # 显示GPU信息
+        if epoch == 1:
+            if self.num_gpus > 1:
+                print(f"🚀 多GPU训练模式:")
+                print(f"  - GPU数量: {self.num_gpus}")
+                print(f"  - 每个GPU的batch_size: {self.batch_size // self.num_gpus}")
+                print(f"  - 总batch_size: {self.batch_size}")
+            else:
+                print("📱 单GPU训练模式")
+        
         for i in range(0, len(triplets), self.batch_size):
             batch_triplets = triplets[i:i + self.batch_size]
             
@@ -370,7 +447,7 @@ class ExpressionPreTrainer:
             # 混合精度训练
             self.optimizer.zero_grad()
             
-            with torch.cuda.amp.autocast():
+            with torch.amp.autocast('cuda'):
                 anchor_emb, positive_emb, negative_emb = self.triplet_model(
                     anchor_tensor, positive_tensor, negative_tensor,
                     anchor_mask_tensor, positive_mask_tensor, negative_mask_tensor
@@ -507,6 +584,14 @@ def main():
     if torch.cuda.is_available():
         print(f"GPU可用: {torch.cuda.get_device_name()}")
         print(f"GPU数量: {torch.cuda.device_count()}")
+        
+        if torch.cuda.device_count() > 1:
+            print("🔥 多GPU检测成功！将使用所有可用GPU进行训练")
+            for i in range(torch.cuda.device_count()):
+                print(f"  - GPU {i}: {torch.cuda.get_device_name(i)}")
+        else:
+            print("📱 单GPU模式")
+        
         # 清理GPU缓存
         torch.cuda.empty_cache()
     
@@ -529,7 +614,10 @@ def main():
         num_layers=12,
         batch_size=16,  # 小batch size用于测试
         learning_rate=5e-5,  # 更小的学习率用于大模型
-        margin=0.3
+        margin=0.3,
+        use_distributed=False,  # 测试阶段不使用分布式
+        rank=0,
+        world_size=1
     )
     
     print("\n开始小规模测试训练...")
@@ -577,7 +665,10 @@ def main():
         num_layers=12,
         batch_size=128,  # 大batch size用于训练
         learning_rate=5e-5,
-        margin=0.3
+        margin=0.3,
+        use_distributed=False,  # 可选：如果需要真正的分布式训练，设置为True
+        rank=0,
+        world_size=1
     )
     
     print(f"\n模型配置:")
@@ -585,8 +676,15 @@ def main():
     print(f"  - 注意力头数: {trainer.nhead}")
     print(f"  - 层数: {trainer.num_layers}")
     print(f"  - 批量大小: {trainer.batch_size}")
-    print(f"  - 学习率: {trainer.learning_rate}")
-    print(f"  - GPU数量: {trainer.num_gpus}")
+    print(f"  - 学习率: {trainer.learning_rate:.2e}")
+    
+    if trainer.num_gpus > 1:
+        print(f"🚀 多GPU训练配置:")
+        print(f"  - GPU数量: {trainer.num_gpus}")
+        print(f"  - 每个GPU的batch_size: {trainer.batch_size // trainer.num_gpus}")
+        print(f"  - 理论加速比: ~{trainer.num_gpus}x")
+    else:
+        print(f"📱 单GPU训练")
     
     # 开始大规模训练
     print(f"\n开始大规模训练 (共 {len(train_expressions):,} 个表达式)...")

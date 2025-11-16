@@ -111,6 +111,12 @@ python mcts_with_reward_network.py --help
   python mcts_with_reward_network.py dataset-file \
       --dataset-path dataset/Feynman_with_units/I.6.2 \
       --max-iterations 10
+
+  # 使用部分数据加速测试（1000条样本）
+  python mcts_with_reward_network.py dataset-file \
+      --dataset-path dataset/Feynman_with_units/I.6.2 \
+      --num-samples 1000 \
+      --max-iterations 10
   ```
 
 **实际运行效果**：
@@ -152,6 +158,7 @@ python mcts_with_reward_network.py composite \
 - `--max-depth`: MCTS最大深度（默认8）
 - `--train-test-split`: 训练/测试集分割比例（默认0.8，即80%训练，20%测试）
 - `--dataset-path`: dataset-file模式下的数据文件路径
+- `--num-samples`: 指定使用数据集的实例数量（默认使用全部数据，可有效控制运行时间）
 - `--use-reward-network VALUE`: 控制是否使用奖励网络增强的MCTS
   - `true`: 使用奖励网络增强的MCTS（默认）
   - `false`: 使用传统MCTS（仅基于R2分数）
@@ -285,7 +292,38 @@ python mcts_with_reward_network.py dataset-file \
     --no-use-reward-network
 ```
 
-### 5. 模式选择建议
+### 5. 数据采样控制运行时间
+
+对于大型数据集，运行时间可能较长。可以使用 `--num-samples` 参数控制使用的样本数量：
+
+**推荐采样策略**：
+- **快速测试**: `--num-samples 1000` (1000条数据)
+- **一般测试**: `--num-samples 10000` (1万条数据)  
+- **完整测试**: 不使用 `--num-samples` (使用全部数据)
+
+**使用示例**：
+```bash
+# 快速原型测试（1000条数据）
+python mcts_with_reward_network.py dataset-file \
+    --dataset-path dataset/Feynman_with_units/I.6.2 \
+    --num-samples 1000 \
+    --max-iterations 100
+
+# 中等规模测试（1万条数据）
+python mcts_with_reward_network.py dataset-file \
+    --dataset-path dataset/Feynman_with_units/I.6.2 \
+    --num-samples 10000 \
+    --max-iterations 500
+
+# 完整测试（全部数据）
+python mcts_with_reward_network.py dataset-file \
+    --dataset-path dataset/Feynman_with_units/I.6.2 \
+    --max-iterations 1000
+```
+
+**注意**：采样是随机选择，确保数据分布的代表性。较大的采样数量通常能获得更稳定的结果。
+
+### 6. 模式选择建议
 
 - **使用奖励网络增强MCTS（默认）当**：
   - 数据集较为复杂
@@ -313,11 +351,15 @@ python mcts_with_reward_network.py dataset-file --dataset-path dataset/Feynman_w
 
 # 费曼数据集快速测试
 python mcts_with_reward_network.py dataset-file --dataset-path dataset/Feynman_with_units/I.6.2 --max-iterations 10
+
+# 使用采样控制运行时间
+python mcts_with_reward_network.py dataset-file --dataset-path dataset/Feynman_with_units/I.6.2 --num-samples 1000 --max-iterations 10
 ```
 
 ### 核心参数
 - **模式控制**: `--use-reward-network true/false` 或 `--no-use-reward-network`
 - **数据集**: `--dataset-path 文件路径（如 dataset/Feynman_with_units/I.6.2）`
+- **数据采样**: `--num-samples 样本数量（控制运行时间）`
 - **搜索参数**: `--max-iterations`, `--max-depth`
 - **数据分割**: `--train-test-split 比例`
 - **模型路径**: `--expr-encoder`, `--reward-network`

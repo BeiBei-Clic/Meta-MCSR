@@ -25,6 +25,7 @@ Meta-MCSR: 基于自学习奖励网络的符号回归系统
 
 选项:
   --dataset-path PATH      dataset-file模式下的数据集文件路径
+  --num-samples N          使用的数据集实例数量 (默认: 使用全部数据)
   --expr-encoder PATH      表达式编码器模型路径 (默认: weights/expression_encoder)
   --reward-network PATH    奖励网络模型路径 (默认: weights/reward_network_final)
   --max-iterations N       MCTS最大迭代次数 (默认: 500)
@@ -37,6 +38,7 @@ Meta-MCSR: 基于自学习奖励网络的符号回归系统
 示例:
   python mcts_with_reward_network.py composite
   python mcts_with_reward_network.py dataset-file --dataset-path dataset/Feynman_with_units/I.6.2
+  python mcts_with_reward_network.py dataset-file --dataset-path dataset/Feynman_with_units/I.6.2 --num-samples 1000
   python mcts_with_reward_network.py composite --no-use-reward-network
   python mcts_with_reward_network.py dataset-file --dataset-path dataset/Feynman_with_units/I.6.2 --use-reward-network false
 
@@ -150,6 +152,7 @@ def main():
         def __init__(self):
             self.mode = None
             self.dataset_path = None
+            self.num_samples = None
             self.expr_encoder = 'weights/expression_encoder'
             self.reward_network = 'weights/reward_network_final'
             self.max_iterations = 500
@@ -173,6 +176,9 @@ def main():
         arg = sys.argv[i]
         if arg == '--dataset-path' and i + 1 < len(sys.argv):
             args.dataset_path = sys.argv[i + 1]
+            i += 2
+        elif arg == '--num-samples' and i + 1 < len(sys.argv):
+            args.num_samples = int(sys.argv[i + 1])
             i += 2
         elif arg == '--expr-encoder' and i + 1 < len(sys.argv):
             args.expr_encoder = sys.argv[i + 1]
@@ -405,9 +411,19 @@ def main():
             X = dataset['X']
             y = dataset['y']
             
-            print(f"\n数据集: {dataset['name']}")
-            print(f"描述: {dataset['description']}")
-            print(f"数据形状: X={X.shape}, y={y.shape}")
+            # 如果指定了样本数量限制，随机选择样本
+            if args.num_samples and args.num_samples > 0 and args.num_samples < len(X):
+                import numpy as np
+                indices = np.random.choice(len(X), args.num_samples, replace=False)
+                X = X[indices]
+                y = y[indices]
+                print(f"\n数据集: {dataset['name']}")
+                print(f"描述: {dataset['description']}")
+                print(f"数据形状: X={X.shape}, y={y.shape} (从 {len(dataset['X'])} 条数据中随机选取 {args.num_samples} 条)")
+            else:
+                print(f"\n数据集: {dataset['name']}")
+                print(f"描述: {dataset['description']}")
+                print(f"数据形状: X={X.shape}, y={y.shape}")
             
             # 检查数据维度是否合适
             if X.shape[1] > 5:

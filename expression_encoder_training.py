@@ -14,15 +14,37 @@ from src.expression_encoder import ExpressionEmbedding, ExpressionTokenizer
 
 
 class ExpressionGenerator:
-    """表达式生成器，用于生成训练数据"""
+    """扩展的表达式生成器，用于生成更多样化的训练数据"""
     
-    def __init__(self, max_depth=6, max_variables=3):
+    def __init__(self, max_depth=8, max_variables=6):
         self.max_depth = max_depth
         self.max_variables = max_variables
-        self.binary_ops = [nd.Add, nd.Sub, nd.Mul, nd.Div]
-        self.unary_ops = [nd.Sin, nd.Cos, nd.Sqrt, nd.Log, nd.Exp]
-        self.constants = [nd.Number(1), nd.Number(2), nd.Number(0.5), nd.Number(-1), nd.Number(3)]
+        
+        # 二元运算符
+        self.binary_ops = [
+            nd.Add, nd.Sub, nd.Mul, nd.Div, 
+            nd.Pow  # 添加更多二元运算符
+        ]
+        
+        # 一元运算符
+        self.unary_ops = [
+            nd.Sin, nd.Cos, nd.Tan, nd.Exp, nd.Log, nd.Sqrt,
+            nd.Abs, nd.Neg  # 添加更多一元运算符
+        ]
+        
+        # 扩展常数集合
+        self.constants = [
+            nd.Number(0), nd.Number(1), nd.Number(2), nd.Number(3), nd.Number(4),
+            nd.Number(0.5), nd.Number(-1), nd.Number(0.25), nd.Number(0.75),
+            nd.Number(1.5), nd.Number(2.5), nd.Number(3.14), nd.Number(-0.5),
+            nd.Number(1.618), nd.Number(2.718)  # 添加数学常数
+        ]
+        
+        # 变量
         self.variables = [nd.Variable(f'x{i+1}') for i in range(max_variables)]
+        
+        # 特殊函数（多参数函数）
+        self.special_functions = [nd.Min, nd.Max]  # 根据nd2py的可用函数
         
     def generate_expression(self, depth=None):
         """生成随机表达式"""
@@ -31,27 +53,56 @@ class ExpressionGenerator:
         
         return self._generate_recursive(depth)
     
-    def _generate_recursive(self, depth):
-        """递归生成表达式"""
+    def _generate_recursive(self, depth, allow_special=False):
+        """递归生成表达式（增强版）"""
         if depth == 0:
             # 叶子节点：变量或常数
-            return random.choice(self.variables + self.constants)
+            choice = random.choice(['variable', 'constant'])
+            if choice == 'variable':
+                return random.choice(self.variables)
+            else:
+                return random.choice(self.constants)
         
-        choice = random.choice(['variable', 'constant', 'unary', 'binary'])
+        # 权重化选择：根据深度调整选择概率
+        if depth <= 2:
+            choices = ['variable', 'constant', 'unary', 'binary', 'special']
+            weights = [0.3, 0.3, 0.2, 0.15, 0.05]
+        else:
+            choices = ['unary', 'binary', 'special']
+            weights = [0.4, 0.5, 0.1]
+        
+        if not allow_special:
+            choices = [c for c in choices if c != 'special']
+            weights = weights[:len(choices)]
+        
+        choice = random.choices(choices, weights=weights)[0]
         
         if choice == 'variable' and depth <= 2:
             return random.choice(self.variables)
         elif choice == 'constant' and depth <= 2:
             return random.choice(self.constants)
         elif choice == 'unary':
-            operand = self._generate_recursive(depth - 1)
+            operand = self._generate_recursive(depth - 1, allow_special)
             op = random.choice(self.unary_ops)
             return op(operand)
-        else:  # binary
-            left = self._generate_recursive(depth - 1)
-            right = self._generate_recursive(depth - 1)
+        elif choice == 'binary':
+            left = self._generate_recursive(depth - 1, allow_special)
+            right = self._generate_recursive(depth - 1, allow_special)
             op = random.choice(self.binary_ops)
             return op(left, right)
+        else:  # special function
+            if self.special_functions and allow_special:
+                func = random.choice(self.special_functions)
+                # 为特殊函数生成2-3个参数
+                num_args = random.randint(2, 3)
+                args = [self._generate_recursive(max(1, depth - 2), allow_special) for _ in range(num_args)]
+                return func(*args)
+            else:
+                # 回退到二元操作
+                left = self._generate_recursive(depth - 1, allow_special)
+                right = self._generate_recursive(depth - 1, allow_special)
+                op = random.choice(self.binary_ops)
+                return op(left, right)
     
     def generate_dataset(self, num_expressions=10000):
         """生成数据集"""
@@ -66,32 +117,101 @@ class ExpressionGenerator:
         
         return expressions
     
-    def generate_curriculum_dataset(self, num_expressions=10000):
-        """生成课程学习数据集（从简单到复杂）"""
+    def generate_curriculum_dataset(self, num_expressions=100000):
+        """生成大规模课程学习数据集"""
         expressions = []
         
-        # 阶段1：简单表达式 (40%)
-        simple_count = int(num_expressions * 0.4)
+        print(f"开始生成 {num_expressions:,} 个表达式...")
+        
+        # 阶段1：简单表达式 (25%)
+        simple_count = int(num_expressions * 0.25)
+        print(f"生成简单表达式: {simple_count:,} 个")
         for i in range(simple_count):
-            expr = self._generate_recursive(random.randint(1, 3))
+            if i % 10000 == 0:
+                print(f"简单表达式进度: {i:,}/{simple_count:,}")
+            expr = self._generate_recursive(random.randint(1, 2), allow_special=False)
             expressions.append(str(expr))
         
-        # 阶段2：中等复杂度表达式 (40%)
-        medium_count = int(num_expressions * 0.4)
+        # 阶段2：中等复杂度表达式 (35%)
+        medium_count = int(num_expressions * 0.35)
+        print(f"生成中等复杂度表达式: {medium_count:,} 个")
         for i in range(medium_count):
-            expr = self._generate_recursive(random.randint(3, 5))
+            if i % 10000 == 0:
+                print(f"中等复杂度表达式进度: {i:,}/{medium_count:,}")
+            expr = self._generate_recursive(random.randint(2, 4), allow_special=True)
             expressions.append(str(expr))
         
-        # 阶段3：复杂表达式 (20%)
-        complex_count = num_expressions - simple_count - medium_count
+        # 阶段3：复杂表达式 (25%)
+        complex_count = int(num_expressions * 0.25)
+        print(f"生成复杂表达式: {complex_count:,} 个")
         for i in range(complex_count):
-            expr = self._generate_recursive(random.randint(4, self.max_depth))
+            if i % 10000 == 0:
+                print(f"复杂表达式进度: {i:,}/{complex_count:,}")
+            expr = self._generate_recursive(random.randint(4, 6), allow_special=True)
+            expressions.append(str(expr))
+        
+        # 阶段4：超复杂表达式 (15%)
+        super_count = num_expressions - simple_count - medium_count - complex_count
+        print(f"生成超复杂表达式: {super_count:,} 个")
+        for i in range(super_count):
+            if i % 10000 == 0:
+                print(f"超复杂表达式进度: {i:,}/{super_count:,}")
+            max_depth_for_super = max(5, self.max_depth)
+            depth = random.randint(5, max_depth_for_super) if max_depth_for_super >= 5 else self.max_depth
+            expr = self._generate_recursive(depth, allow_special=True)
             expressions.append(str(expr))
         
         # 打乱数据
         random.shuffle(expressions)
         
+        print(f"数据集生成完成！总计 {len(expressions):,} 个表达式")
         return expressions
+    
+    def generate_specialized_datasets(self):
+        """生成专门的表达式数据集"""
+        datasets = {}
+        
+        # 线性表达式
+        print("生成线性表达式数据集...")
+        linear_exprs = []
+        for _ in range(10000):
+            expr = nd.Add(
+                nd.Mul(nd.Variable('x1'), random.choice([nd.Number(i) for i in range(-5, 6) if i != 0])),
+                nd.Mul(nd.Variable('x2'), random.choice([nd.Number(i) for i in range(-5, 6) if i != 0])),
+                nd.Number(random.randint(-10, 10))
+            )
+            linear_exprs.append(str(expr))
+        
+        # 多项式表达式
+        print("生成多项式表达式数据集...")
+        polynomial_exprs = []
+        for _ in range(10000):
+            degree = random.randint(2, 4)
+            expr = nd.Variable('x1')
+            for i in range(2, degree + 1):
+                coeff = nd.Number(random.randint(1, 5))
+                power = nd.Pow(nd.Variable('x1'), nd.Number(i))
+                term = nd.Mul(coeff, power)
+                expr = nd.Add(expr, term)
+            polynomial_exprs.append(str(expr))
+        
+        # 三角函数表达式
+        print("生成三角函数表达式数据集...")
+        trig_exprs = []
+        for _ in range(10000):
+            func = random.choice([nd.Sin, nd.Cos, nd.Tan])
+            arg = nd.Add(
+                nd.Mul(nd.Variable('x1'), nd.Number(random.randint(1, 5))),
+                nd.Number(random.randint(-10, 10))
+            )
+            expr = func(arg)
+            trig_exprs.append(str(expr))
+        
+        datasets['linear'] = linear_exprs
+        datasets['polynomial'] = polynomial_exprs
+        datasets['trigonometric'] = trig_exprs
+        
+        return datasets
 
 
 class TripletLossModel(nn.Module):
@@ -114,10 +234,10 @@ class TripletLossModel(nn.Module):
 
 
 class ExpressionPreTrainer:
-    """表达式嵌入器预训练器（使用三元组损失）"""
+    """表达式嵌入器预训练器（使用三元组损失，支持100M参数模型和多GPU）"""
     
-    def __init__(self, d_model=256, nhead=8, num_layers=6, 
-                 batch_size=32, learning_rate=1e-4, max_seq_length=128, margin=0.5):
+    def __init__(self, d_model=768, nhead=12, num_layers=12, 
+                 batch_size=64, learning_rate=1e-4, max_seq_length=128, margin=0.5):
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.d_model = d_model
         self.nhead = nhead
@@ -127,6 +247,10 @@ class ExpressionPreTrainer:
         self.max_seq_length = max_seq_length
         self.margin = margin
         
+        # 多GPU设置 - 暂时禁用多GPU以避免设备不匹配问题
+        self.num_gpus = 1  # torch.cuda.device_count()
+        print(f"检测到 {torch.cuda.device_count()} 个GPU设备，但为避免设备问题暂时使用单GPU训练")
+        
         # 创建嵌入器和分词器
         self.embedding = ExpressionEmbedding()
         self.tokenizer = ExpressionTokenizer()
@@ -135,6 +259,7 @@ class ExpressionPreTrainer:
         self.triplet_model = None
         self.optimizer = None
         self.criterion = nn.TripletMarginLoss(margin=margin, p=2)
+        self.scaler = torch.cuda.amp.GradScaler()  # 混合精度训练
         
     def prepare_training_data(self, expressions):
         """准备训练数据"""
@@ -151,6 +276,19 @@ class ExpressionPreTrainer:
             self.embedding.model, 
             margin=self.margin
         ).to(self.device)
+        
+        # 多GPU包装
+        if self.num_gpus > 1:
+            self.triplet_model = nn.DataParallel(self.triplet_model)
+            print(f"已启用多GPU数据并行训练，batch_size自动调整为 {self.batch_size * self.num_gpus}")
+        
+        # 优化器 - 使用不同的学习率
+        self.optimizer = torch.optim.AdamW(
+            self.triplet_model.parameters(), 
+            lr=self.learning_rate,
+            weight_decay=0.01,
+            betas=(0.9, 0.999)
+        )
         
         self.optimizer = torch.optim.Adam(
             self.triplet_model.parameters(), 
@@ -181,7 +319,7 @@ class ExpressionPreTrainer:
         return triplets
     
     def train_epoch(self, expressions, epoch):
-        """训练一个epoch（使用三元组损失）"""
+        """训练一个epoch（使用三元组损失和混合精度训练）"""
         self.triplet_model.train()
         total_loss = 0
         
@@ -229,26 +367,30 @@ class ExpressionPreTrainer:
             positive_mask_tensor = torch.tensor(positive_masks, device=self.device)
             negative_mask_tensor = torch.tensor(negative_masks, device=self.device)
             
-            # 前向传播
+            # 混合精度训练
             self.optimizer.zero_grad()
-            anchor_emb, positive_emb, negative_emb = self.triplet_model(
-                anchor_tensor, positive_tensor, negative_tensor,
-                anchor_mask_tensor, positive_mask_tensor, negative_mask_tensor
-            )
             
-            # 计算三元组损失
-            loss = self.criterion(anchor_emb, positive_emb, negative_emb)
+            with torch.cuda.amp.autocast():
+                anchor_emb, positive_emb, negative_emb = self.triplet_model(
+                    anchor_tensor, positive_tensor, negative_tensor,
+                    anchor_mask_tensor, positive_mask_tensor, negative_mask_tensor
+                )
+                
+                # 计算三元组损失
+                loss = self.criterion(anchor_emb, positive_emb, negative_emb)
             
             # 反向传播
-            loss.backward()
+            self.scaler.scale(loss).backward()
+            self.scaler.unscale_(self.optimizer)
             torch.nn.utils.clip_grad_norm_(self.triplet_model.parameters(), max_norm=1.0)
-            self.optimizer.step()
+            self.scaler.step(self.optimizer)
+            self.scaler.update()
             
             total_loss += loss.item()
             num_batches += 1
             
-            if i % (self.batch_size * 10) == 0:
-                print(f"Epoch {epoch}, Batch {i//self.batch_size}, Loss: {loss.item():.4f}")
+            if i % (self.batch_size * 5) == 0:
+                print(f"Epoch {epoch}, Batch {i//self.batch_size}, Loss: {loss.item():.4f}, LR: {self.optimizer.param_groups[0]['lr']:.2e}")
         
         return total_loss / num_batches if num_batches > 0 else 0
     
@@ -352,68 +494,123 @@ class ExpressionPreTrainer:
 
 
 def main():
-    """主函数"""
-    print("表达式嵌入器预训练")
-    print("=" * 50)
+    """主函数 - 100M参数表达式嵌入器预训练"""
+    print("大规模表达式嵌入器预训练 (100M参数)")
+    print("=" * 60)
     
     # 设置随机种子
     random.seed(42)
     np.random.seed(42)
     torch.manual_seed(42)
     
+    # 设置GPU内存优化
+    if torch.cuda.is_available():
+        print(f"GPU可用: {torch.cuda.get_device_name()}")
+        print(f"GPU数量: {torch.cuda.device_count()}")
+        # 清理GPU缓存
+        torch.cuda.empty_cache()
+    
     # 创建表达式生成器
-    generator = ExpressionGenerator(max_depth=6, max_variables=3)
+    generator = ExpressionGenerator(max_depth=8, max_variables=6)
     
-    # 生成训练数据
-    print("生成训练数据...")
-    train_expressions = generator.generate_curriculum_dataset(50000)
+    # 先生成小量测试数据验证代码
+    print("\n=== 步骤1：小规模测试数据验证 ===")
+    test_train_expressions = generator.generate_curriculum_dataset(1000)
+    test_val_expressions = generator.generate_curriculum_dataset(200)
     
-    # 生成验证数据
-    print("生成验证数据...")
-    val_expressions = generator.generate_curriculum_dataset(5000)
-    
-    print(f"训练表达式示例:")
-    for i, expr in enumerate(train_expressions[:5]):
+    print(f"测试训练表达式示例:")
+    for i, expr in enumerate(test_train_expressions[:5]):
         print(f"  {i+1}. {expr}")
     
-    # 创建预训练器
-    trainer = ExpressionPreTrainer(
-        d_model=256,
-        nhead=8,
-        num_layers=6,
-        batch_size=64,
-        learning_rate=1e-4
+    # 创建测试预训练器
+    test_trainer = ExpressionPreTrainer(
+        d_model=768,
+        nhead=12,
+        num_layers=12,
+        batch_size=16,  # 小batch size用于测试
+        learning_rate=5e-5,  # 更小的学习率用于大模型
+        margin=0.3
     )
     
-    # 开始训练
+    print("\n开始小规模测试训练...")
+    test_trainer.prepare_training_data(test_train_expressions)
+    
+    # 运行一个测试epoch
+    print("运行测试epoch...")
+    test_loss = test_trainer.train_epoch(test_train_expressions, 1)
+    print(f"测试epoch完成，平均损失: {test_loss:.4f}")
+    
+    if test_loss > 10.0:  # 如果损失异常高
+        print("警告：测试损失过高，可能存在数值稳定性问题")
+        return
+    
+    print("✅ 小规模测试通过！")
+    
+    # 如果测试通过，询问是否继续大规模训练
+    print("\n=== 步骤2：大规模训练 ===")
+    user_input = input("小规模测试通过！是否继续大规模训练？(y/N): ").strip().lower()
+    if user_input not in ['y', 'yes', '是']:
+        print("大规模训练已取消")
+        return
+    
+    # 生成大规模训练数据
+    print("\n生成大规模训练数据...")
+    train_expressions = generator.generate_curriculum_dataset(200000)
+    val_expressions = generator.generate_curriculum_dataset(20000)
+    
+    # 生成专门数据集
+    print("\n生成专门化数据集...")
+    specialized_datasets = generator.generate_specialized_datasets()
+    for name, exprs in specialized_datasets.items():
+        print(f"{name} 表达式数量: {len(exprs):,}")
+        train_expressions.extend(exprs)
+    
+    print(f"总训练表达式数量: {len(train_expressions):,}")
+    
+    # 打乱所有训练数据
+    random.shuffle(train_expressions)
+    
+    # 创建大规模预训练器
+    trainer = ExpressionPreTrainer(
+        d_model=768,
+        nhead=12,
+        num_layers=12,
+        batch_size=128,  # 大batch size用于训练
+        learning_rate=5e-5,
+        margin=0.3
+    )
+    
+    print(f"\n模型配置:")
+    print(f"  - 隐藏维度: {trainer.d_model}")
+    print(f"  - 注意力头数: {trainer.nhead}")
+    print(f"  - 层数: {trainer.num_layers}")
+    print(f"  - 批量大小: {trainer.batch_size}")
+    print(f"  - 学习率: {trainer.learning_rate}")
+    print(f"  - GPU数量: {trainer.num_gpus}")
+    
+    # 开始大规模训练
+    print(f"\n开始大规模训练 (共 {len(train_expressions):,} 个表达式)...")
     trainer.train(
         train_expressions=train_expressions,
         val_expressions=val_expressions,
-        num_epochs=30,
-        save_path='weights/expression_encoder'  # 这个参数现在只用于参考
+        num_epochs=50,
+        save_path='weights/expression_encoder'
     )
     
-    # 保存最终模型到weights文件夹
+    # 保存最终模型
     final_path = 'weights/expression_encoder'
     trainer.embedding.save_model(final_path)
     print(f"最终模型已保存到: {final_path}")
     
-    # 清理weights文件夹，只保留推理必需的文件
-    print("清理weights文件夹...")
-    try:
-        import subprocess
-        import os
-        result = subprocess.run(['python3', 'tools/clean_weights.py', '--force'], 
-                              capture_output=True, text=True, cwd=os.path.dirname(__file__))
-        if result.returncode == 0:
-            print("weights文件夹清理完成！")
-        else:
-            print("警告：weights文件夹清理失败")
-    except Exception as e:
-        print(f"警告：无法运行清理工具 - {e}")
+    # 显示模型参数统计
+    if hasattr(trainer.embedding.model, 'module'):
+        param_count = trainer.embedding.model.module.get_parameter_count()
+    else:
+        param_count = trainer.embedding.model.get_parameter_count()
+    print(f"最终模型参数量: {param_count:,} ({param_count/1e6:.1f}M)")
     
-    print("=" * 50)
-    print("预训练完成！")
+    print("=" * 60)
+    print("大规模预训练完成！")
 
 
 if __name__ == "__main__":

@@ -129,31 +129,45 @@ class PositionalEncoding(nn.Module):
 
 
 class ExpressionEncoder(nn.Module):
-    """基于Transformer的表达式编码器"""
+    """基于Transformer的表达式编码器（扩展到100M参数）"""
     
-    def __init__(self, vocab_size, d_model=256, nhead=8, num_layers=6, 
-                 dim_feedforward=512, max_seq_length=128, dropout=0.1):
+    def __init__(self, vocab_size, d_model=768, nhead=12, num_layers=12, 
+                 dim_feedforward=3072, max_seq_length=128, dropout=0.1):
         super().__init__()
         
         self.d_model = d_model
         self.max_seq_length = max_seq_length
         
+        # 词嵌入层
         self.embedding = nn.Embedding(vocab_size, d_model, padding_idx=0)
+        self.embed_dropout = nn.Dropout(dropout)
+        
+        # 位置编码
         self.pos_encoding = PositionalEncoding(d_model, max_seq_length)
         
+        # 预层归一化（Pre-LayerNorm）架构
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=d_model,
             nhead=nhead,
             dim_feedforward=dim_feedforward,
             dropout=dropout,
             batch_first=True,
-            activation='gelu'
+            activation='gelu',
+            norm_first=True  # 使用预层归一化
         )
         
         self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers)
         
-        # 池化层
-        self.pooling = nn.AdaptiveAvgPool1d(1)
+        # 输出层
+        self.output_norm = nn.LayerNorm(d_model)
+        self.output_dropout = nn.Dropout(dropout)
+        
+        # 参数统计
+        self._param_count = self._count_parameters()
+        
+    def _count_parameters(self):
+        """计算模型参数量"""
+        return sum(p.numel() for p in self.parameters() if p.requires_grad)
         
     def forward(self, token_ids, attention_mask=None, return_sequence=False):
         """
@@ -170,8 +184,11 @@ class ExpressionEncoder(nn.Module):
         """
         batch_size, seq_len = token_ids.size()
         
-        # 嵌入
+        # 词嵌入
         x = self.embedding(token_ids) * math.sqrt(self.d_model)
+        x = self.embed_dropout(x)
+        
+        # 位置编码
         x = self.pos_encoding(x)
         
         # Transformer编码
@@ -182,11 +199,15 @@ class ExpressionEncoder(nn.Module):
         else:
             x = self.transformer_encoder(x)
         
+        # 输出层
+        x = self.output_norm(x)
+        x = self.output_dropout(x)
+        
         if return_sequence:
             # 返回序列级别的输出
             return x
         else:
-            # 全局平均池化
+            # 注意力加权池化（比简单的平均池化更好）
             if attention_mask is not None:
                 # 只对非padding位置进行池化
                 mask_expanded = attention_mask.unsqueeze(-1).expand(x.size())
@@ -194,12 +215,16 @@ class ExpressionEncoder(nn.Module):
                 # 确保sum_mask的形状是[batch_size, 1]
                 if sum_mask.dim() == 3 and sum_mask.size(-1) > 1:
                     sum_mask = sum_mask.sum(dim=-1, keepdim=True)
-                # 池化操作
+                # 加权平均池化
                 x = (x * mask_expanded).sum(dim=1) / sum_mask.squeeze(-1).clamp(min=1e-9)
             else:
                 x = x.mean(dim=1)
             
             return x
+    
+    def get_parameter_count(self):
+        """获取模型参数量"""
+        return self._param_count
 
 
 class ExpressionEmbedding:
@@ -219,8 +244,8 @@ class ExpressionEmbedding:
         self.tokenizer.fit(expressions)
         print(f"词汇表大小: {self.tokenizer.vocab_size}")
     
-    def create_model(self, d_model=256, nhead=8, num_layers=6):
-        """创建模型"""
+    def create_model(self, d_model=768, nhead=12, num_layers=12):
+        """创建模型（默认100M参数配置）"""
         self.model = ExpressionEncoder(
             vocab_size=self.tokenizer.vocab_size,
             d_model=d_model,
@@ -228,6 +253,44 @@ class ExpressionEmbedding:
             num_layers=num_layers,
             max_seq_length=self.max_seq_length
         ).to(self.device)
+        
+        # 打印模型信息
+        param_count = self.model.get_parameter_count()
+        print(f"模型创建完成！参数量: {param_count:,} ({param_count / 1e6:.1f}M)")
+        
+        # 启用多GPU训练
+        if torch.cuda.device_count() > 1:
+            print(f"检测到 {torch.cuda.device_count()} 个GPU，启用数据并行训练")
+            self.model = nn.DataParallel(self.model)
+    
+    def load_model(self, model_path):
+        """加载模型"""
+        import pickle
+        
+        # 加载tokenizer
+        with open(model_path + '_tokenizer.pkl', 'rb') as f:
+            self.tokenizer = pickle.load(f)
+        
+        # 创建模型
+        self.create_model()
+        
+        # 加载权重
+        state_dict = torch.load(model_path + '_model.pth', map_location=self.device)
+        
+        # 如果是多GPU训练的模型，需要移除 'module.' 前缀
+        if torch.cuda.device_count() > 1:
+            from collections import OrderedDict
+            new_state_dict = OrderedDict()
+            for k, v in state_dict.items():
+                if k.startswith('module.'):
+                    k = k[7:]  # 移除 'module.' 前缀
+                new_state_dict[k] = v
+            state_dict = new_state_dict
+        
+        self.model.module.load_state_dict(state_dict) if hasattr(self.model, 'module') else self.model.load_state_dict(state_dict)
+        self.model.eval()
+        
+        print(f"模型已从 {model_path} 加载")
     
     def encode_expressions(self, expressions, batch_size=32):
         """批量编码表达式为嵌入向量"""

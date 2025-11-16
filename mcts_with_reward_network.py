@@ -59,7 +59,7 @@ def save_experiment_results(args, problem_name, dataset_name, result, use_reward
     
     # 生成文件名：基于时间和模式
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    dataset_base = os.path.splitext(os.path.basename(args.dataset_path))[0]
+    dataset_base = os.path.basename(args.dataset_path).replace('.', '_')
     filename = f"{dataset_base}_{timestamp}.txt"
     
     filepath = os.path.join(result_dir, filename)

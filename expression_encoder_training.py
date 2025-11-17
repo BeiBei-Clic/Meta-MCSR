@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import numpy as np
 import random
 import sys
@@ -221,6 +222,11 @@ class TripletLossModel(nn.Module):
         positive_emb = self.encoder(positive_ids, positive_mask)
         negative_emb = self.encoder(negative_ids, negative_mask)
         
+        # L2归一化 - 关键！防止梯度爆炸
+        anchor_emb = F.normalize(anchor_emb, p=2, dim=1)
+        positive_emb = F.normalize(positive_emb, p=2, dim=1)
+        negative_emb = F.normalize(negative_emb, p=2, dim=1)
+        
         return anchor_emb, positive_emb, negative_emb
     
     def get_parameter_count(self):
@@ -294,7 +300,7 @@ class ExpressionPreTrainer:
         
         # 梯度监控
         self.grad_norms = []
-        self.gradient_clip_val = 20.0  # 进一步提高梯度裁剪阈值
+        self.gradient_clip_val = 0.1  # 进一步降低梯度裁剪阈值到0.1
         
     def prepare_training_data(self, expressions):
         """准备训练数据"""
@@ -349,12 +355,23 @@ class ExpressionPreTrainer:
             print(f"单GPU训练，设备: {self.device}")
         
         # 优化器 - 使用AdamW for better training stability
+        # 降低学习率并调整betas以提高训练稳定性
         self.optimizer = torch.optim.AdamW(
             self.triplet_model.parameters(), 
             lr=self.learning_rate,
             weight_decay=0.01,
-            betas=(0.9, 0.999),
-            eps=1e-8
+            betas=(0.9, 0.98),  # Transformer推荐值
+            eps=1e-6  # 提高数值稳定性
+        )
+        
+        # 学习率调度器 - 使用预热和线性衰减
+        self.scheduler = torch.optim.lr_scheduler.OneCycleLR(
+            self.optimizer,
+            max_lr=self.learning_rate,
+            steps_per_epoch=1000,  # 假设每个epoch约1000步
+            epochs=50,
+            pct_start=0.1,  # 10%的预热阶段
+            anneal_strategy='cos'
         )
     
     def check_gradients(self):
@@ -823,13 +840,16 @@ class ExpressionPreTrainer:
                 # 检查梯度 - 在裁剪前检查
                 grad_norm = self.check_gradients()
                 
-                # 梯度裁剪 - 使用更严格的裁剪
+                # 梯度裁剪 - 使用固定的小阈值
                 self.scaler.unscale_(self.optimizer)
-                torch.nn.utils.clip_grad_norm_(self.triplet_model.parameters(), max_norm=min(self.gradient_clip_val, grad_norm * 0.8))
+                torch.nn.utils.clip_grad_norm_(self.triplet_model.parameters(), max_norm=self.gradient_clip_val)
                 
                 # 只在梯度正常时更新
                 self.scaler.step(self.optimizer)
                 self.scaler.update()
+                
+                # 更新学习率调度器
+                self.scheduler.step()
                 
                 # 记录有效的损失和梯度
                 total_loss += loss.item()

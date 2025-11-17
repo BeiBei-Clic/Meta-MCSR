@@ -254,11 +254,30 @@ class ExpressionEmbedding:
             max_seq_length=self.max_seq_length
         ).to(self.device)
         
+        # 权重初始化 - 使用Xavier初始化提高训练稳定性
+        self._initialize_weights()
+        
         # 打印模型信息
         param_count = self.get_parameter_count()
         print(f"模型创建完成！参数量: {param_count:,} ({param_count / 1e6:.1f}M)")
         
         # 注意：不在这里启用DataParallel，由上层调用者处理多GPU包装
+    
+    def _initialize_weights(self):
+        """初始化模型权重，提高训练稳定性"""
+        for module in self.model.modules():
+            if isinstance(module, nn.Linear):
+                # 对线性层使用Xavier均匀初始化
+                nn.init.xavier_uniform_(module.weight)
+                if module.bias is not None:
+                    nn.init.constant_(module.bias, 0)
+            elif isinstance(module, nn.Embedding):
+                # 对嵌入层使用正态分布初始化
+                nn.init.normal_(module.weight, mean=0, std=0.02)
+            elif isinstance(module, nn.LayerNorm):
+                # 对层归一化使用恒等初始化
+                nn.init.constant_(module.bias, 0)
+                nn.init.constant_(module.weight, 1.0)
     
     def get_parameter_count(self):
         """获取模型参数量（支持DataParallel）"""

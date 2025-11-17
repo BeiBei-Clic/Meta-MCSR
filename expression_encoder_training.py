@@ -380,80 +380,335 @@ class ExpressionPreTrainer:
         return 0
         
     def generate_triplets(self, expressions):
-        """生成三元组数据 (anchor, positive, negative) - 改进版本"""
+        """生成三元组数据 (anchor, positive, negative) - 基于表达式结构操作"""
         triplets = []
         
-        # 创建表达式复杂度映射，用于更好的负样本选择
-        complexity_map = {}
-        for expr in expressions:
-            complexity = len(expr) + expr.count('(') * 2 + expr.count('*') + expr.count('/')
-            complexity_map[expr] = complexity
-        
         for i, anchor_expr in enumerate(expressions):
-            # 正样本：生成与anchor相似的表达式
-            positive_expr = self._generate_similar_expression(anchor_expr)
+            # 正样本：将锚点表达式低层运算符（运算符带着的整颗子树）去掉来构建
+            positive_expr = self._generate_positive_by_removing_operator(anchor_expr)
             
-            # 负样本：选择复杂度差异较大的表达式
-            anchor_complexity = complexity_map[anchor_expr]
-            neg_candidates = []
+            # 负样本：将锚点表达式中某一运算符替换来构建
+            negative_expr = self._generate_negative_by_replacing_operator(anchor_expr)
             
-            for j, candidate in enumerate(expressions):
-                if j != i:  # 不选择自己
-                    candidate_complexity = complexity_map[candidate]
-                    # 选择复杂度差异至少20%的作为负样本
-                    if abs(candidate_complexity - anchor_complexity) / max(anchor_complexity, 1) > 0.2:
-                        neg_candidates.append(candidate)
-            
-            if neg_candidates:
-                negative_expr = random.choice(neg_candidates)
-            else:
-                # 如果没有找到合适的负样本，使用随机选择
-                neg_idx = random.randint(0, len(expressions) - 1)
-                if neg_idx == i:
-                    neg_idx = (neg_idx + 1) % len(expressions)
-                negative_expr = expressions[neg_idx]
+            # 确保生成的正负样本与锚点不同
+            if positive_expr == anchor_expr:
+                positive_expr = self._generate_positive_by_removing_operator(anchor_expr)
+            if negative_expr == anchor_expr:
+                negative_expr = self._generate_negative_by_replacing_operator(anchor_expr)
             
             triplets.append((anchor_expr, positive_expr, negative_expr))
         
         return triplets
     
-    def _generate_similar_expression(self, base_expr):
-        """生成与基准表达式相似的表达式"""
-        base_str = str(base_expr)
+    def _generate_positive_by_removing_operator(self, anchor_expr_str):
+        """通过简化表达式来构建正样本：移除括号或简化表达"""
+        import re
         
-        # 简单的相似性变换
+        # 策略1：尝试移除最外层的括号
+        expr = anchor_expr_str.strip()
+        if expr.startswith('(') and expr.endswith(')'):
+            # 检查括号是否匹配
+            paren_count = 0
+            for i, char in enumerate(expr):
+                if char == '(':
+                    paren_count += 1
+                elif char == ')':
+                    paren_count -= 1
+                    if paren_count == 0 and i < len(expr) - 1:
+                        # 括号不匹配，不是最外层括号
+                        break
+            else:
+                # 括号匹配，可以移除
+                inner_expr = expr[1:-1].strip()
+                if inner_expr:
+                    return inner_expr
+        
+        # 策略2：移除某些函数调用
+        # 移除 sin() 或 cos() 等
+        pattern = r'\b(sin|cos|tan|exp|log|sqrt|abs)\s*\(([^)]+)\)'
+        if re.search(pattern, expr):
+            match = re.search(pattern, expr)
+            if match:
+                return match.group(2)  # 返回函数内部的参数
+        
+        # 策略3：简化算术表达式
+        # 如果有连续的括号，尝试简化
+        simplified = expr.replace('()', '').strip()
+        if simplified and simplified != expr:
+            return simplified
+        
+        # 策略4：随机移除某个运算符的整个操作数
+        operators = ['+', '-', '*', '/', '**']
+        for op in operators:
+            if op in expr:
+                # 找到运算符的位置（不匹配括号）
+                paren_count = 0
+                op_pos = -1
+                for i, char in enumerate(expr):
+                    if char == '(':
+                        paren_count += 1
+                    elif char == ')':
+                        paren_count -= 1
+                    elif char == op and paren_count == 0:
+                        op_pos = i
+                        break
+                
+                if op_pos > 0:
+                    # 分割表达式
+                    left = expr[:op_pos].strip()
+                    right = expr[op_pos+1:].strip()
+                    
+                    # 尝试移除右操作数
+                    if right:
+                        # 如果右操作数在括号中，移除括号
+                        if right.startswith('(') and right.endswith(')'):
+                            return left
+                        else:
+                            # 简单情况下直接返回左操作数
+                            return left
+        
+        # 如果所有策略都失败，返回原始表达式
+        return expr
+    
+    def _generate_negative_by_replacing_operator(self, anchor_expr_str):
+        """通过替换运算符来构建负样本"""
+        import re
+        
+        expr = anchor_expr_str.strip()
+        
+        # 策略1：替换算术运算符
+        operator_mappings = [
+            # 替换 + 为其他运算符
+            (r'\+', '-'),
+            (r'-', '+'),
+            (r'\*', '/'),
+            (r'/', '*'),
+            (r'\*\*', '+'),  # 替换 ** 为 +
+        ]
+        
+        for pattern, replacement in operator_mappings:
+            # 只在最高层替换（不考虑括号内的）
+            paren_count = 0
+            modified_chars = []
+            replaced = False
+            
+            for i, char in enumerate(expr):
+                if char == '(':
+                    paren_count += 1
+                elif char == ')':
+                    paren_count -= 1
+                elif char in '+-*/' and paren_count == 0:
+                    # 检查是否匹配模式
+                    if char == '+' and pattern == r'\+':
+                        modified_chars.append(replacement)
+                        replaced = True
+                    elif char == '-' and pattern == '-':
+                        modified_chars.append(replacement)
+                        replaced = True
+                    elif char == '*' and pattern == r'\*':
+                        modified_chars.append(replacement)
+                        replaced = True
+                    elif char == '/' and pattern == '/':
+                        modified_chars.append(replacement)
+                        replaced = True
+                    else:
+                        modified_chars.append(char)
+                else:
+                    modified_chars.append(char)
+            
+            if replaced:
+                return ''.join(modified_chars).strip()
+        
+        # 策略2：替换函数名
+        function_mappings = [
+            (r'\bsin\b', 'cos'),
+            (r'\bcos\b', 'sin'),
+            (r'\btan\b', 'sin'),
+            (r'\bexp\b', 'log'),
+            (r'\blog\b', 'exp'),
+            (r'\bsqrt\b', 'abs'),
+        ]
+        
+        for pattern, replacement in function_mappings:
+            new_expr = re.sub(pattern, replacement, expr)
+            if new_expr != expr:
+                return new_expr
+        
+        # 策略3：如果找不到可替换的运算符，尝试添加否定或常量
+        if 'sin' in expr or 'cos' in expr:
+            # 在三角函数前加负号
+            new_expr = re.sub(r'\b(sin|cos|tan)\b', r'-\1', expr)
+            if new_expr != expr:
+                return new_expr
+        
+        # 策略4：添加随机数字到表达式
         import random
+        if random.random() < 0.5:
+            # 在表达式前添加随机数字
+            random_num = random.choice([0, 1, 2, 0.5])
+            return f"{random_num} + ({expr})"
+        else:
+            # 在表达式后添加随机数字
+            random_num = random.choice([1, 0, -1])
+            return f"({expr}) + {random_num}"
         
-        # 避免除零操作，只在安全的变换中使用除法
-        # 变量替换
-        if 'x1' in base_str and random.random() > 0.3:
-            return base_str.replace('x1', 'x2' if 'x2' in base_str else 'x1')
-        elif 'x2' in base_str and random.random() > 0.3:
-            return base_str.replace('x2', 'x1')
+        # 如果所有策略都失败，返回原始表达式
+        return expr
+    
+    def _find_operator_nodes(self, expr):
+        """找到表达式中的所有运算符节点"""
+        nodes = []
         
-        # 常数微调 - 避免产生0或非常小的数
-        if '1.0' in base_str:
-            new_val = '1.1' if random.random() > 0.5 else '0.8'  # 避免0.9可能导致的数值问题
-            return base_str.replace('1.0', new_val)
-        elif '2.0' in base_str:
-            new_val = '2.1' if random.random() > 0.5 else '1.8'
-            return base_str.replace('2.0', new_val)
-        elif '3.0' in base_str:
-            new_val = '3.1' if random.random() > 0.5 else '2.8'
-            return base_str.replace('3.0', new_val)
+        # 检查是否是运算符节点（二元或一元运算符）
+        if hasattr(expr, '__class__'):
+            class_name = expr.__class__.__name__
+            
+            # 二元运算符
+            if class_name in ['Add', 'Sub', 'Mul', 'Div', 'Pow']:
+                nodes.append(expr)
+                # 递归查找子节点
+                if hasattr(expr, 'left'):
+                    nodes.extend(self._find_operator_nodes(expr.left))
+                if hasattr(expr, 'right'):
+                    nodes.extend(self._find_operator_nodes(expr.right))
+            
+            # 一元运算符
+            elif class_name in ['Sin', 'Cos', 'Tan', 'Exp', 'Log', 'Sqrt']:
+                nodes.append(expr)
+                # 递归查找子节点
+                if hasattr(expr, 'operand'):
+                    nodes.extend(self._find_operator_nodes(expr.operand))
         
-        # 操作符变换 - 谨慎使用除法
-        if '+' in base_str:
-            return base_str.replace('+', '-', 1)
-        elif '-' in base_str:
-            return base_str.replace('-', '+', 1)
-        # 只有在有足够大常数时才使用除法
-        elif ('*' in base_str and '2.0' in base_str) or ('*' in base_str and '3.0' in base_str):
-            if random.random() > 0.7:  # 降低除法变换概率
-                return base_str.replace('*', '/', 1)
+        return nodes
+    
+    def _remove_node(self, expr, target_node):
+        """删除指定的节点，返回修改后的表达式"""
+        if expr is target_node:
+            # 如果要删除的是根节点，返回None
+            return None
+            
+        if hasattr(expr, 'left') and expr.left is target_node:
+            # 删除左子树，返回右子树（如果是二元运算符）
+            if hasattr(expr, 'right'):
+                return expr.right
+            else:
+                # 如果是一元运算符，返回操作数
+                if hasattr(expr, 'operand'):
+                    return expr.operand
+                    
+        if hasattr(expr, 'right') and expr.right is target_node:
+            # 删除右子树，返回左子树
+            return expr.left
+            
+        if hasattr(expr, 'operand') and expr.operand is target_node:
+            # 删除一元运算符的操作数，返回操作数
+            return expr.operand
         
-        # 如果没有找到可替换的，返回原表达式
-        return base_expr
+        # 递归修改子树
+        if hasattr(expr, 'left') and expr.left is not target_node:
+            new_left = self._remove_node(expr.left, target_node)
+            if new_left is not None:
+                expr.left = new_left
+            else:
+                # 如果左子树被删除，返回右子树
+                if hasattr(expr, 'right'):
+                    return expr.right
+                    
+        if hasattr(expr, 'right') and expr.right is not target_node:
+            new_right = self._remove_node(expr.right, target_node)
+            if new_right is not None:
+                expr.right = new_right
+            else:
+                # 如果右子树被删除，返回左子树
+                if hasattr(expr, 'left'):
+                    return expr.left
+                    
+        if hasattr(expr, 'operand') and expr.operand is not target_node:
+            new_operand = self._remove_node(expr.operand, target_node)
+            if new_operand is not None:
+                expr.operand = new_operand
+            else:
+                return None
+        
+        return expr
+    
+    def _replace_node(self, expr, target_node):
+        """替换指定的运算符节点"""
+        if expr is target_node:
+            # 替换当前节点
+            return self._get_replacement_operator(expr)
+            
+        # 递归修改子树
+        modified = False
+        
+        if hasattr(expr, 'left') and expr.left is target_node:
+            expr.left = self._replace_node(expr.left, target_node)
+            modified = True
+            
+        if hasattr(expr, 'right') and expr.right is target_node:
+            expr.right = self._replace_node(expr.right, target_node)
+            modified = True
+            
+        if hasattr(expr, 'operand') and expr.operand is target_node:
+            expr.operand = self._replace_node(expr.operand, target_node)
+            modified = True
+            
+        # 如果没有修改子树，递归修改子节点
+        if not modified:
+            if hasattr(expr, 'left') and expr.left is not target_node:
+                new_left = self._replace_node(expr.left, target_node)
+                if new_left != expr.left:
+                    expr.left = new_left
+                    
+            if hasattr(expr, 'right') and expr.right is target_node:
+                new_right = self._replace_node(expr.right, target_node)
+                if new_right != expr.right:
+                    expr.right = new_right
+                    
+            if hasattr(expr, 'operand') and expr.operand is not target_node:
+                new_operand = self._replace_node(expr.operand, target_node)
+                if new_operand != expr.operand:
+                    expr.operand = new_operand
+        
+        return expr
+    
+    def _get_replacement_operator(self, original_node):
+        """为给定的运算符节点获取替换运算符"""
+        class_name = original_node.__class__.__name__
+        
+        # 二元运算符替换映射
+        binary_replacements = {
+            'Add': [nd.Sub, nd.Mul, nd.Div],
+            'Sub': [nd.Add, nd.Mul, nd.Div],
+            'Mul': [nd.Add, nd.Sub, nd.Div],
+            'Div': [nd.Add, nd.Sub, nd.Mul],
+            'Pow': [nd.Add, nd.Sub, nd.Mul]
+        }
+        
+        # 一元运算符替换映射
+        unary_replacements = {
+            'Sin': [nd.Cos, nd.Tan, nd.Exp],
+            'Cos': [nd.Sin, nd.Tan, nd.Exp],
+            'Tan': [nd.Sin, nd.Cos, nd.Exp],
+            'Exp': [nd.Log, nd.Sin, nd.Cos],
+            'Log': [nd.Sqrt, nd.Exp, nd.Sin],
+            'Sqrt': [nd.Exp, nd.Log, nd.Sin]
+        }
+        
+        if class_name in binary_replacements:
+            # 获取原操作数
+            if hasattr(original_node, 'left') and hasattr(original_node, 'right'):
+                new_op_class = random.choice(binary_replacements[class_name])
+                return new_op_class(original_node.left, original_node.right)
+                
+        elif class_name in unary_replacements:
+            # 获取原操作数
+            if hasattr(original_node, 'operand'):
+                new_op_class = random.choice(unary_replacements[class_name])
+                return new_op_class(original_node.operand)
+        
+        # 如果没有合适的替换，返回原节点
+        return original_node
     
     def train_epoch(self, expressions, epoch):
         """训练一个epoch（使用三元组损失和混合精度训练，添加梯度监控）"""
@@ -473,29 +728,10 @@ class ExpressionPreTrainer:
         print("开始生成三元组...")
         print(f"  生成进度: 0/{len(expressions)}", end="")
         
-        # 优化三元组生成 - 简化负样本选择算法
-        triplets = []
-        for i, anchor_expr in enumerate(expressions):
-            # 正样本：生成与anchor相似的表达式
-            positive_expr = self._generate_similar_expression(anchor_expr)
-            
-            # 简化负样本选择：随机选择但确保不重复
-            if len(expressions) > 1:
-                neg_idx = (i + 1) % len(expressions)  # 选择下一个，避免循环
-                if neg_idx == i:
-                    neg_idx = (i + 2) % len(expressions)
-            else:
-                neg_idx = i  # 只有一个样本时
-            
-            negative_expr = expressions[neg_idx]
-            
-            triplets.append((anchor_expr, positive_expr, negative_expr))
-            
-            # 显示进度
-            if (i + 1) % 10000 == 0:
-                print(f"\r  生成进度: {i+1}/{len(expressions)}", end="")
-        
-        print(f"\r  生成进度: {len(expressions)}/{len(expressions)} ✅")
+        # 使用新的三元组生成方法
+        print("开始生成三元组...")
+        triplets = self.generate_triplets(expressions)
+        print(f"三元组生成完成: {len(triplets)} 个三元组")
         
         # 随机打乱
         random.shuffle(triplets)
@@ -776,7 +1012,14 @@ def main():
     
     # 如果测试通过，询问是否继续大规模训练
     print("\n=== 步骤2：大规模训练 ===")
-    user_input = input("小规模测试通过！是否继续大规模训练？(y/N): ").strip().lower()
+    try:
+        user_input = input("小规模测试通过！是否继续大规模训练？(y/N): ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        # 在非交互环境中，自动选择不继续大规模训练
+        print("检测到非交互环境，默认不进行大规模训练")
+        print("要运行大规模训练，请手动运行脚本并输入 'y'")
+        return
+    
     if user_input not in ['y', 'yes', '是']:
         print("大规模训练已取消")
         return

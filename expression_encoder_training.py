@@ -29,7 +29,7 @@ class ExpressionGenerator:
         # 一元运算符
         self.unary_ops = [
             nd.Sin, nd.Cos, nd.Tan, nd.Exp, nd.Log, nd.Sqrt,
-            nd.Abs, nd.Neg  # 添加更多一元运算符
+            # nd.Abs, nd.Neg  # 添加更多一元运算符
         ]
         
         # 扩展常数集合
@@ -134,14 +134,14 @@ class ExpressionGenerator:
         medium_count = int(num_expressions * 0.35)
         print(f"生成中等复杂度表达式: {medium_count:,} 个")
         for i in range(medium_count):
-            expr = self._generate_recursive(random.randint(2, 4), allow_special=True)
+            expr = self._generate_recursive(random.randint(2, 4), allow_special=False)
             expressions.append(str(expr))
         
         # 阶段3：复杂表达式 (25%)
         complex_count = int(num_expressions * 0.25)
         print(f"生成复杂表达式: {complex_count:,} 个")
         for i in range(complex_count):
-            expr = self._generate_recursive(random.randint(4, 6), allow_special=True)
+            expr = self._generate_recursive(random.randint(4, 6), allow_special=False)
             expressions.append(str(expr))
         
         # 阶段4：超复杂表达式 (15%)
@@ -149,7 +149,7 @@ class ExpressionGenerator:
         print(f"生成超复杂表达式: {super_count:,} 个")
         for i in range(super_count):
             depth = random.randint(5, self.max_depth)
-            expr = self._generate_recursive(depth, allow_special=True)
+            expr = self._generate_recursive(depth, allow_special=False)
             expressions.append(str(expr))
         
         # 打乱数据
@@ -462,11 +462,6 @@ class ExpressionPreTrainer:
         total_grad_norm = 0
         skipped_batches = 0  # 记录跳过的批次
         
-        # 验证输入数据
-        if not expressions or len(expressions) == 0:
-            print("❌ 错误：没有有效的表达式数据")
-            return float('inf')
-        
         # GPU状态监控 - 增强版
         gpu_usage = []
         for i in range(self.num_gpus):
@@ -475,51 +470,32 @@ class ExpressionPreTrainer:
                 gpu_usage.append(memory_allocated)
                 print(f"  GPU {i} 内存: {memory_allocated:.2f}GB")
         
-        training_expressions = expressions
-        
         print("开始生成三元组...")
-        print(f"  生成进度: 0/{len(training_expressions)}", end="")
+        print(f"  生成进度: 0/{len(expressions)}", end="")
         
         # 优化三元组生成 - 简化负样本选择算法
         triplets = []
-        for i, anchor_expr in enumerate(training_expressions):
+        for i, anchor_expr in enumerate(expressions):
             # 正样本：生成与anchor相似的表达式
             positive_expr = self._generate_similar_expression(anchor_expr)
             
             # 简化负样本选择：随机选择但确保不重复
-            if len(training_expressions) > 1:
-                neg_idx = (i + 1) % len(training_expressions)  # 选择下一个，避免循环
+            if len(expressions) > 1:
+                neg_idx = (i + 1) % len(expressions)  # 选择下一个，避免循环
                 if neg_idx == i:
-                    neg_idx = (i + 2) % len(training_expressions)
+                    neg_idx = (i + 2) % len(expressions)
             else:
                 neg_idx = i  # 只有一个样本时
             
-            negative_expr = training_expressions[neg_idx]
+            negative_expr = expressions[neg_idx]
             
             triplets.append((anchor_expr, positive_expr, negative_expr))
             
             # 显示进度
-            if (i + 1) % 1000 == 0:
-                print(f"\r  生成进度: {i+1}/{len(training_expressions)}", end="")
+            if (i + 1) % 10000 == 0:
+                print(f"\r  生成进度: {i+1}/{len(expressions)}", end="")
         
-        print(f"\r  生成进度: {len(training_expressions)}/{len(training_expressions)} ✅")
-        
-        # 验证三元组质量 - 简化验证
-        valid_triplets = []
-        skipped = 0
-        
-        for anchor, positive, negative in triplets:
-            # 简化的有效性检查
-            if (anchor != positive and anchor != negative and positive != negative):
-                valid_triplets.append((anchor, positive, negative))
-            else:
-                skipped += 1
-        
-        if skipped > 0:
-            print(f"  过滤无效三元组: {skipped} 个")
-        print(f"  ✅ 有效三元组: {len(valid_triplets)} 个")
-        
-        triplets = valid_triplets
+        print(f"\r  生成进度: {len(expressions)}/{len(expressions)} ✅")
         
         # 随机打乱
         random.shuffle(triplets)
@@ -529,7 +505,6 @@ class ExpressionPreTrainer:
             return float('inf')
         
         print(f"开始训练: {len(triplets)} 个三元组，批次大小: {self.batch_size}，预计批次: {(len(triplets) + self.batch_size - 1) // self.batch_size}")
-        print("📊 准备开始训练...（首次batch可能需要较长时间进行DataParallel初始化）")
         
         # 分批处理
         num_batches = 0
@@ -593,7 +568,7 @@ class ExpressionPreTrainer:
                         gpu_usage_after.append(memory_allocated)
                     
                     # 检查是否有GPU真正参与计算
-                    if num_batches % 10 == 0:  # 每10个批次显示一次
+                    if num_batches % 100 == 0:  # 每10个批次显示一次
                         print(f"  GPU负载检查: {[f'{m:.2f}' for m in gpu_usage_after]}")
                     
                     # 计算三元组损失
@@ -611,13 +586,6 @@ class ExpressionPreTrainer:
                 
                 # 检查梯度 - 在裁剪前检查
                 grad_norm = self.check_gradients()
-                
-                # 检查是否有梯度爆炸 - 更严格的检查
-                if grad_norm != grad_norm or grad_norm == float('inf') or grad_norm > 50000:  # 提高阈值到5万
-                    print(f"⚠️ 梯度异常: {grad_norm:.4f}, 跳过此批次")
-                    self.optimizer.zero_grad()  # 清零梯度，避免累积
-                    skipped_batches += 1
-                    continue
                 
                 # 梯度裁剪 - 使用更严格的裁剪
                 self.scaler.unscale_(self.optimizer)
@@ -737,16 +705,6 @@ class ExpressionPreTrainer:
             print(f"\nEpoch {epoch + 1}/{num_epochs}")
             print("-" * 50)
             
-            # 每次epoch前检查GPU状态
-            if epoch == 0:
-                print(f"🎯 多GPU训练状态检查:")
-                if hasattr(self.triplet_model, 'module'):
-                    print(f"  ✅ DataParallel已激活")
-                    print(f"  GPU数量: {self.num_gpus}")
-                    print(f"  当前设备: {next(self.triplet_model.parameters()).device}")
-                else:
-                    print(f"  ⚠️ 未检测到DataParallel")
-            
             # 训练
             train_loss = self.train_epoch(train_expressions, epoch + 1)
             print(f"训练损失: {train_loss:.4f}")
@@ -803,7 +761,7 @@ def main():
     print("\n=== 步骤1：小规模测试数据验证 ===")
     test_train_expressions = generator.generate_curriculum_dataset(1000)
     
-    # 创建测试预训练器 - 与大规模训练保持一致
+    # 创建测试预训练器
     test_trainer = ExpressionPreTrainer()
     
     print("\n开始小规模测试训练...")

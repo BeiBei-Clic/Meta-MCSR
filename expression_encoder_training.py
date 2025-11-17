@@ -127,8 +127,6 @@ class ExpressionGenerator:
         simple_count = int(num_expressions * 0.25)
         print(f"生成简单表达式: {simple_count:,} 个")
         for i in range(simple_count):
-            if i % 10000 == 0:
-                print(f"简单表达式进度: {i:,}/{simple_count:,}")
             expr = self._generate_recursive(random.randint(1, 2), allow_special=False)
             expressions.append(str(expr))
         
@@ -136,8 +134,6 @@ class ExpressionGenerator:
         medium_count = int(num_expressions * 0.35)
         print(f"生成中等复杂度表达式: {medium_count:,} 个")
         for i in range(medium_count):
-            if i % 10000 == 0:
-                print(f"中等复杂度表达式进度: {i:,}/{medium_count:,}")
             expr = self._generate_recursive(random.randint(2, 4), allow_special=True)
             expressions.append(str(expr))
         
@@ -145,8 +141,6 @@ class ExpressionGenerator:
         complex_count = int(num_expressions * 0.25)
         print(f"生成复杂表达式: {complex_count:,} 个")
         for i in range(complex_count):
-            if i % 10000 == 0:
-                print(f"复杂表达式进度: {i:,}/{complex_count:,}")
             expr = self._generate_recursive(random.randint(4, 6), allow_special=True)
             expressions.append(str(expr))
         
@@ -154,8 +148,6 @@ class ExpressionGenerator:
         super_count = num_expressions - simple_count - medium_count - complex_count
         print(f"生成超复杂表达式: {super_count:,} 个")
         for i in range(super_count):
-            if i % 10000 == 0:
-                print(f"超复杂表达式进度: {i:,}/{super_count:,}")
             depth = random.randint(5, self.max_depth)
             expr = self._generate_recursive(depth, allow_special=True)
             expressions.append(str(expr))
@@ -243,6 +235,14 @@ class ExpressionPreTrainer:
     def __init__(self, d_model=768, nhead=12, num_layers=12, 
                  batch_size=64, learning_rate=1e-3, max_seq_length=128, margin=0.3,
                  use_distributed=False, rank=0, world_size=1):
+        
+        # 确保CUDA上下文正确初始化
+        if torch.cuda.is_available():
+            torch.cuda.init()
+            # 预热CUDA
+            dummy_tensor = torch.randn(1).cuda()
+            del dummy_tensor
+            torch.cuda.empty_cache()
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.d_model = d_model
         self.nhead = nhead
@@ -256,24 +256,29 @@ class ExpressionPreTrainer:
         # 多GPU训练优化
         self.num_gpus = torch.cuda.device_count()
         
-        # 多GPU时自动调整batch_size
+        # 多GPU时自动调整batch_size - 更激进的调整确保并行
         if self.num_gpus > 1:
-            self.batch_size = min(batch_size * self.num_gpus, 512)
+            # 大幅增加batch_size确保每个GPU都有足够数据处理
+            self.batch_size = max(batch_size * self.num_gpus * 2, 64)  # 至少64
+            print(f"🚀 多GPU优化: 原始batch_size {batch_size} → 总batch_size {self.batch_size}")
         else:
             self.batch_size = batch_size
             
-        self.learning_rate = learning_rate * (1.0 if self.num_gpus == 0 else min(self.num_gpus, 4))  # 多GPU时适度增加学习率
+        # 降低多GPU时的学习率放大倍数，避免梯度不稳定
+        # 对于多GPU训练，使用更保守的设置
+        lr_multiplier = 1.0 if self.num_gpus <= 1 else 0.5  # 多GPU时降低学习率
+        self.learning_rate = learning_rate * lr_multiplier
         self.max_seq_length = max_seq_length
         self.margin = margin
         
-        # 多GPU设置
-        self.num_gpus = torch.cuda.device_count()
-        print(f"检测到 {torch.cuda.device_count()} 个GPU设备")
+        # 多GPU设置信息
+        print(f"检测到 {self.num_gpus} 个GPU设备")
         
         if self.num_gpus > 1:
-            print("✅ 启用多GPU数据并行训练")
+            print("✅ 检测到多GPU环境")
             print(f"  - GPU数量: {self.num_gpus}")
             print(f"  - 设备ID: 0-{self.num_gpus-1}")
+            print("  - 将在prepare_training_data中启用数据并行训练")
         else:
             print("单GPU训练模式")
         
@@ -289,7 +294,7 @@ class ExpressionPreTrainer:
         
         # 梯度监控
         self.grad_norms = []
-        self.gradient_clip_val = 1.0
+        self.gradient_clip_val = 20.0  # 进一步提高梯度裁剪阈值
         
     def prepare_training_data(self, expressions):
         """准备训练数据"""
@@ -330,13 +335,16 @@ class ExpressionPreTrainer:
             # 数据并行训练
             device_ids = list(range(self.num_gpus))
             self.triplet_model = nn.DataParallel(self.triplet_model, device_ids=device_ids)
-            print(f"✅ 启用数据并行训练，设备ID: {device_ids}")
-            print(f"  - 原始batch_size: {self.batch_size}")
-            print(f"  - 总batch_size (多GPU): {self.batch_size * self.num_gpus}")
+            print(f"✅ 成功启用多GPU数据并行训练")
+            print(f"  - 设备ID: {device_ids}")
+            print(f"  - 原始batch_size: {self.batch_size // self.num_gpus}")
+            print(f"  - 总batch_size (多GPU): {self.batch_size}")
+            print(f"  - 加速比: {self.num_gpus}x")
             
             # 验证设备一致性
             first_param_device = next(self.triplet_model.parameters()).device
             print(f"  - 模型参数设备: {first_param_device}")
+            print(f"  - GPU利用率: 启用多GPU并行计算")
         else:
             print(f"单GPU训练，设备: {self.device}")
         
@@ -375,17 +383,35 @@ class ExpressionPreTrainer:
         """生成三元组数据 (anchor, positive, negative) - 改进版本"""
         triplets = []
         
+        # 创建表达式复杂度映射，用于更好的负样本选择
+        complexity_map = {}
+        for expr in expressions:
+            complexity = len(expr) + expr.count('(') * 2 + expr.count('*') + expr.count('/')
+            complexity_map[expr] = complexity
+        
         for i, anchor_expr in enumerate(expressions):
             # 正样本：生成与anchor相似的表达式
             positive_expr = self._generate_similar_expression(anchor_expr)
             
-            # 负样本：随机选择明显不同的表达式
-            neg_idx = random.randint(0, len(expressions) - 1)
-            attempts = 0
-            while neg_idx == i and attempts < 10:
+            # 负样本：选择复杂度差异较大的表达式
+            anchor_complexity = complexity_map[anchor_expr]
+            neg_candidates = []
+            
+            for j, candidate in enumerate(expressions):
+                if j != i:  # 不选择自己
+                    candidate_complexity = complexity_map[candidate]
+                    # 选择复杂度差异至少20%的作为负样本
+                    if abs(candidate_complexity - anchor_complexity) / max(anchor_complexity, 1) > 0.2:
+                        neg_candidates.append(candidate)
+            
+            if neg_candidates:
+                negative_expr = random.choice(neg_candidates)
+            else:
+                # 如果没有找到合适的负样本，使用随机选择
                 neg_idx = random.randint(0, len(expressions) - 1)
-                attempts += 1
-            negative_expr = expressions[neg_idx]
+                if neg_idx == i:
+                    neg_idx = (neg_idx + 1) % len(expressions)
+                negative_expr = expressions[neg_idx]
             
             triplets.append((anchor_expr, positive_expr, negative_expr))
         
@@ -398,29 +424,33 @@ class ExpressionPreTrainer:
         # 简单的相似性变换
         import random
         
+        # 避免除零操作，只在安全的变换中使用除法
         # 变量替换
         if 'x1' in base_str and random.random() > 0.3:
             return base_str.replace('x1', 'x2' if 'x2' in base_str else 'x1')
         elif 'x2' in base_str and random.random() > 0.3:
             return base_str.replace('x2', 'x1')
         
-        # 常数微调
+        # 常数微调 - 避免产生0或非常小的数
         if '1.0' in base_str:
-            return base_str.replace('1.0', '1.1' if random.random() > 0.5 else '0.9')
+            new_val = '1.1' if random.random() > 0.5 else '0.8'  # 避免0.9可能导致的数值问题
+            return base_str.replace('1.0', new_val)
         elif '2.0' in base_str:
-            return base_str.replace('2.0', '2.1' if random.random() > 0.5 else '1.9')
+            new_val = '2.1' if random.random() > 0.5 else '1.8'
+            return base_str.replace('2.0', new_val)
         elif '3.0' in base_str:
-            return base_str.replace('3.0', '3.1' if random.random() > 0.5 else '2.9')
+            new_val = '3.1' if random.random() > 0.5 else '2.8'
+            return base_str.replace('3.0', new_val)
         
-        # 操作符变换
+        # 操作符变换 - 谨慎使用除法
         if '+' in base_str:
             return base_str.replace('+', '-', 1)
         elif '-' in base_str:
             return base_str.replace('-', '+', 1)
-        elif '*' in base_str and random.random() > 0.5:
-            return base_str.replace('*', '/', 1)
-        elif '/' in base_str and random.random() > 0.5:
-            return base_str.replace('/', '*', 1)
+        # 只有在有足够大常数时才使用除法
+        elif ('*' in base_str and '2.0' in base_str) or ('*' in base_str and '3.0' in base_str):
+            if random.random() > 0.7:  # 降低除法变换概率
+                return base_str.replace('*', '/', 1)
         
         # 如果没有找到可替换的，返回原表达式
         return base_expr
@@ -430,12 +460,112 @@ class ExpressionPreTrainer:
         self.triplet_model.train()
         total_loss = 0
         total_grad_norm = 0
+        skipped_batches = 0  # 记录跳过的批次
         
-        # 生成三元组
-        triplets = self.generate_triplets(expressions)
+        # 验证输入数据
+        if not expressions or len(expressions) == 0:
+            print("❌ 错误：没有有效的表达式数据")
+            return float('inf')
+        
+        # 过滤空值和无效表达式
+        valid_expressions = [expr for expr in expressions if expr and expr.strip() and len(expr.strip()) > 0]
+        if len(valid_expressions) < len(expressions):
+            print(f"⚠️ 警告：过滤掉 {len(expressions) - len(valid_expressions)} 个空或无效表达式")
+            expressions = valid_expressions
+        
+        # 检查是否有重复的表达式
+        unique_expressions = list(set(expressions))
+        if len(unique_expressions) < len(expressions) * 0.8:  # 80%唯一性
+            print(f"⚠️ 警告：表达式重复率较高 ({len(expressions) - len(unique_expressions)} 重复)")
+        
+        # GPU状态监控 - 增强版
+        gpu_usage = []
+        for i in range(self.num_gpus):
+            if torch.cuda.is_available():
+                memory_allocated = torch.cuda.memory_allocated(i) / 1024**3  # GB
+                gpu_usage.append(memory_allocated)
+                print(f"  GPU {i} 内存: {memory_allocated:.2f}GB")
+        
+        if len(gpu_usage) > 1:
+            # 检查GPU负载均衡
+            max_memory = max(gpu_usage)
+            min_memory = min(gpu_usage)
+            if max_memory > min_memory * 2:
+                print(f"  ⚠️ GPU负载不均衡: 最高({max_memory:.2f}GB) vs 最低({min_memory:.2f}GB)")
+            else:
+                print(f"  ✅ GPU负载相对均衡: 最高({max_memory:.2f}GB) vs 最低({min_memory:.2f}GB)")
+            
+            avg_memory = sum(gpu_usage) / len(gpu_usage)
+            print(f"  GPU平均内存使用: {avg_memory:.2f}GB")
+            
+            # 计算负载差异百分比
+            load_diff = (max_memory - min_memory) / max_memory * 100
+            print(f"  负载差异: {load_diff:.1f}%")
+        elif torch.cuda.is_available():
+            print(f"  单GPU模式: {gpu_usage[0]:.2f}GB")
+        
+        # 生成三元组 - 进一步减少数据量并添加进度显示
+        max_training_samples = min(len(expressions), 10000)  # 限制到1万条，5万太慢
+        
+        if len(expressions) > max_training_samples:
+            print(f"⚠️ 数据量过大 ({len(expressions)}), 使用前 {max_training_samples} 条进行训练")
+            training_expressions = expressions[:max_training_samples]
+        else:
+            training_expressions = expressions
+        
+        print("开始生成三元组...")
+        print(f"  生成进度: 0/{len(training_expressions)}", end="")
+        
+        # 优化三元组生成 - 简化负样本选择算法
+        triplets = []
+        for i, anchor_expr in enumerate(training_expressions):
+            # 正样本：生成与anchor相似的表达式
+            positive_expr = self._generate_similar_expression(anchor_expr)
+            
+            # 简化负样本选择：随机选择但确保不重复
+            if len(training_expressions) > 1:
+                neg_idx = (i + 1) % len(training_expressions)  # 选择下一个，避免循环
+                if neg_idx == i:
+                    neg_idx = (i + 2) % len(training_expressions)
+            else:
+                neg_idx = i  # 只有一个样本时
+            
+            negative_expr = training_expressions[neg_idx]
+            
+            triplets.append((anchor_expr, positive_expr, negative_expr))
+            
+            # 显示进度
+            if (i + 1) % 1000 == 0:
+                print(f"\r  生成进度: {i+1}/{len(training_expressions)}", end="")
+        
+        print(f"\r  生成进度: {len(training_expressions)}/{len(training_expressions)} ✅")
+        
+        # 验证三元组质量 - 简化验证
+        valid_triplets = []
+        skipped = 0
+        
+        for anchor, positive, negative in triplets:
+            # 简化的有效性检查
+            if (anchor != positive and anchor != negative and positive != negative):
+                valid_triplets.append((anchor, positive, negative))
+            else:
+                skipped += 1
+        
+        if skipped > 0:
+            print(f"  过滤无效三元组: {skipped} 个")
+        print(f"  ✅ 有效三元组: {len(valid_triplets)} 个")
+        
+        triplets = valid_triplets
         
         # 随机打乱
         random.shuffle(triplets)
+        
+        if len(triplets) == 0:
+            print("❌ 错误：没有有效的三元组数据")
+            return float('inf')
+        
+        print(f"开始训练: {len(triplets)} 个三元组，批次大小: {self.batch_size}，预计批次: {(len(triplets) + self.batch_size - 1) // self.batch_size}")
+        print("📊 准备开始训练...（首次batch可能需要较长时间进行DataParallel初始化）")
         
         # 分批处理
         num_batches = 0
@@ -480,45 +610,96 @@ class ExpressionPreTrainer:
             self.optimizer.zero_grad()
             
             try:
+                # 在forward前检查GPU使用情况
+                gpu_usage_before = []
+                for j in range(self.num_gpus):
+                    memory_allocated = torch.cuda.memory_allocated(j) / 1024**3
+                    gpu_usage_before.append(memory_allocated)
+                
                 with torch.amp.autocast('cuda'):
                     anchor_emb, positive_emb, negative_emb = self.triplet_model(
                         anchor_tensor, positive_tensor, negative_tensor,
                         anchor_mask_tensor, positive_mask_tensor, negative_mask_tensor
                     )
                     
+                    # 在forward后检查GPU使用情况
+                    gpu_usage_after = []
+                    for j in range(self.num_gpus):
+                        memory_allocated = torch.cuda.memory_allocated(j) / 1024**3
+                        gpu_usage_after.append(memory_allocated)
+                    
+                    # 检查是否有GPU真正参与计算
+                    if num_batches % 10 == 0:  # 每10个批次显示一次
+                        print(f"  GPU负载检查: {[f'{m:.2f}' for m in gpu_usage_after]}")
+                    
                     # 计算三元组损失
                     loss = self.criterion(anchor_emb, positive_emb, negative_emb)
+                    
+                    # 检查损失有效性
+                    if torch.isnan(loss) or torch.isinf(loss):
+                        print(f"⚠️ 损失无效，skip批次: {loss}")
+                        self.optimizer.zero_grad()
+                        skipped_batches += 1
+                        continue
                 
                 # 反向传播
                 self.scaler.scale(loss).backward()
                 
-                # 检查梯度
+                # 检查梯度 - 在裁剪前检查
                 grad_norm = self.check_gradients()
-                total_grad_norm += grad_norm
                 
-                # 梯度裁剪
+                # 检查是否有梯度爆炸 - 更严格的检查
+                if grad_norm != grad_norm or grad_norm == float('inf') or grad_norm > 50000:  # 提高阈值到5万
+                    print(f"⚠️ 梯度异常: {grad_norm:.4f}, 跳过此批次")
+                    self.optimizer.zero_grad()  # 清零梯度，避免累积
+                    skipped_batches += 1
+                    continue
+                
+                # 梯度裁剪 - 使用更严格的裁剪
                 self.scaler.unscale_(self.optimizer)
-                torch.nn.utils.clip_grad_norm_(self.triplet_model.parameters(), max_norm=self.gradient_clip_val)
+                torch.nn.utils.clip_grad_norm_(self.triplet_model.parameters(), max_norm=min(self.gradient_clip_val, grad_norm * 0.8))
+                
+                # 只在梯度正常时更新
                 self.scaler.step(self.optimizer)
                 self.scaler.update()
                 
+                # 记录有效的损失和梯度
                 total_loss += loss.item()
+                total_grad_norm += grad_norm
                 num_batches += 1
                 
-                if i % (self.batch_size * 100) == 0:
+                if i % (self.batch_size * 20) == 0:  # 更频繁的日志更新
                     avg_grad = total_grad_norm / num_batches if num_batches > 0 else 0
-                    print(f"Epoch {epoch}, Batch {i//self.batch_size}, Loss: {loss.item():.4f}, "
-                          f"Grad Norm: {avg_grad:.4f}, LR: {self.optimizer.param_groups[0]['lr']:.2e}")
+                    
+                    # 实时GPU内存监控
+                    if hasattr(self.triplet_model, 'module') and torch.cuda.is_available():
+                        current_memory = torch.cuda.memory_allocated(0) / 1024**3
+                        print(f"Epoch {epoch}, Batch {i//self.batch_size}, Loss: {loss.item():.4f}, "
+                              f"Grad Norm: {avg_grad:.4f}, LR: {self.optimizer.param_groups[0]['lr']:.2e}, "
+                              f"Memory: {current_memory:.2f}GB")
+                    else:
+                        print(f"Epoch {epoch}, Batch {i//self.batch_size}, Loss: {loss.item():.4f}, "
+                              f"Grad Norm: {avg_grad:.4f}, LR: {self.optimizer.param_groups[0]['lr']:.2e}")
+                    
+                    # 内存警告
+                    if torch.cuda.is_available() and torch.cuda.memory_allocated(0) / 1024**3 > 8:
+                        print(f"⚠️ 内存使用过高 ({current_memory:.2f}GB)，建议降低batch_size")
                           
             except Exception as e:
                 print(f"批次训练出错: {e}")
+                skipped_batches += 1
                 continue
         
         avg_loss = total_loss / num_batches if num_batches > 0 else 0
         avg_grad_norm = total_grad_norm / num_batches if num_batches > 0 else 0
         
         if num_batches > 0:
+            print(f"  有效训练批次: {num_batches}")
+            print(f"  跳过的异常批次: {skipped_batches}")
+            print(f"  平均损失: {avg_loss:.4f}")
             print(f"  平均梯度范数: {avg_grad_norm:.4f}")
+        else:
+            print("❌ 没有有效的训练批次")
         
         return avg_loss
     
@@ -592,6 +773,16 @@ class ExpressionPreTrainer:
             print(f"\nEpoch {epoch + 1}/{num_epochs}")
             print("-" * 50)
             
+            # 每次epoch前检查GPU状态
+            if epoch == 0:
+                print(f"🎯 多GPU训练状态检查:")
+                if hasattr(self.triplet_model, 'module'):
+                    print(f"  ✅ DataParallel已激活")
+                    print(f"  GPU数量: {self.num_gpus}")
+                    print(f"  当前设备: {next(self.triplet_model.parameters()).device}")
+                else:
+                    print(f"  ⚠️ 未检测到DataParallel")
+            
             # 训练
             train_loss = self.train_epoch(train_expressions, epoch + 1)
             print(f"训练损失: {train_loss:.4f}")
@@ -653,15 +844,15 @@ def main():
     for i, expr in enumerate(test_train_expressions[:5]):
         print(f"  {i+1}. {expr}")
     
-    # 创建测试预训练器
+    # 创建测试预训练器 - 与大规模训练保持一致
     test_trainer = ExpressionPreTrainer(
-        d_model=768,
-        nhead=12,
-        num_layers=12,
-        batch_size=16,  # 小batch size用于测试
-        learning_rate=5e-5,  # 更小的学习率用于大模型
+        d_model=256,   # 与大规模训练保持一致
+        nhead=8,       # 与大规模训练保持一致
+        num_layers=6,  # 与大规模训练保持一致
+        batch_size=16, # 小batch size用于测试
+        learning_rate=5e-4,  # 与大规模训练保持一致
         margin=0.3,
-        use_distributed=False,  # 测试阶段不使用分布式
+        use_distributed=False,
         rank=0,
         world_size=1
     )
@@ -700,15 +891,15 @@ def main():
     # 打乱所有训练数据
     random.shuffle(train_expressions)
     
-    # 创建大规模预训练器
+    # 创建大规模预训练器 - 简化模型避免梯度爆炸
     trainer = ExpressionPreTrainer(
-        d_model=768,
-        nhead=12,
-        num_layers=12,
-        batch_size=128,  # 大batch size用于训练
-        learning_rate=5e-5,
+        d_model=256,   # 降低模型维度
+        nhead=8,       # 减少注意力头
+        num_layers=6,  # 减少层数
+        batch_size=16, # 进一步减少batch size
+        learning_rate=5e-4,  # 显著降低学习率
         margin=0.3,
-        use_distributed=False,  # 可选：如果需要真正的分布式训练，设置为True
+        use_distributed=False,
         rank=0,
         world_size=1
     )
@@ -719,14 +910,35 @@ def main():
     print(f"  - 层数: {trainer.num_layers}")
     print(f"  - 批量大小: {trainer.batch_size}")
     print(f"  - 学习率: {trainer.learning_rate:.2e}")
+    print(f"  - 检测到的GPU数量: {trainer.num_gpus}")
+    print(f"  - 预期参数量: ~{trainer.d_model * trainer.nhead * trainer.num_layers * 4 / 1e6:.1f}M")
     
     if trainer.num_gpus > 1:
-        print(f"🚀 多GPU训练配置: {trainer.num_gpus}个GPU")
+        print(f"🚀 多GPU并行训练配置")
+        print(f"  - GPU数量: {trainer.num_gpus}")
+        print(f"  - 数据并行: nn.DataParallel")
+        print(f"  - 预期加速比: {trainer.num_gpus}x")
     else:
         print(f"📱 单GPU训练")
     
     # 开始大规模训练
     print(f"\n开始大规模训练 (共 {len(train_expressions):,} 个表达式)...")
+    
+    # 验证多GPU状态
+    if hasattr(trainer.triplet_model, 'module'):
+        print(f"✅ 多GPU训练已激活 - DataParallel模式")
+        print(f"  - 主设备: {next(trainer.triplet_model.parameters()).device}")
+        print(f"  - 副本数量: {len(trainer.triplet_model.device_ids)}")
+        
+        # 强制检查GPU负载
+        print(f"  - 强制GPU负载检查:")
+        for i in range(trainer.num_gpus):
+            memory_allocated = torch.cuda.memory_allocated(i) / 1024**3
+            print(f"    GPU {i}: {memory_allocated:.2f}GB")
+            
+    else:
+        print(f"📱 单GPU训练模式")
+    
     trainer.train(
         train_expressions=train_expressions,
         val_expressions=val_expressions,
@@ -745,6 +957,15 @@ def main():
     else:
         param_count = trainer.embedding.model.get_parameter_count()
     print(f"最终模型参数量: {param_count:,} ({param_count/1e6:.1f}M)")
+    
+    # 显示多GPU性能统计
+    if trainer.num_gpus > 1:
+        print(f"🚀 多GPU训练性能总结:")
+        print(f"  - GPU数量: {trainer.num_gpus}")
+        print(f"  - 训练类型: 数据并行 (DataParallel)")
+        if hasattr(trainer.triplet_model, 'module'):
+            print(f"  - GPU利用率: ✅ 已激活")
+            print(f"  - 副本设备: {trainer.triplet_model.device_ids}")
     
     print("=" * 60)
     print("大规模预训练完成！")

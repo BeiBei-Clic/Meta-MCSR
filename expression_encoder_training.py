@@ -467,17 +467,6 @@ class ExpressionPreTrainer:
             print("❌ 错误：没有有效的表达式数据")
             return float('inf')
         
-        # 过滤空值和无效表达式
-        valid_expressions = [expr for expr in expressions if expr and expr.strip() and len(expr.strip()) > 0]
-        if len(valid_expressions) < len(expressions):
-            print(f"⚠️ 警告：过滤掉 {len(expressions) - len(valid_expressions)} 个空或无效表达式")
-            expressions = valid_expressions
-        
-        # 检查是否有重复的表达式
-        unique_expressions = list(set(expressions))
-        if len(unique_expressions) < len(expressions) * 0.8:  # 80%唯一性
-            print(f"⚠️ 警告：表达式重复率较高 ({len(expressions) - len(unique_expressions)} 重复)")
-        
         # GPU状态监控 - 增强版
         gpu_usage = []
         for i in range(self.num_gpus):
@@ -486,32 +475,7 @@ class ExpressionPreTrainer:
                 gpu_usage.append(memory_allocated)
                 print(f"  GPU {i} 内存: {memory_allocated:.2f}GB")
         
-        if len(gpu_usage) > 1:
-            # 检查GPU负载均衡
-            max_memory = max(gpu_usage)
-            min_memory = min(gpu_usage)
-            if max_memory > min_memory * 2:
-                print(f"  ⚠️ GPU负载不均衡: 最高({max_memory:.2f}GB) vs 最低({min_memory:.2f}GB)")
-            else:
-                print(f"  ✅ GPU负载相对均衡: 最高({max_memory:.2f}GB) vs 最低({min_memory:.2f}GB)")
-            
-            avg_memory = sum(gpu_usage) / len(gpu_usage)
-            print(f"  GPU平均内存使用: {avg_memory:.2f}GB")
-            
-            # 计算负载差异百分比
-            load_diff = (max_memory - min_memory) / max_memory * 100
-            print(f"  负载差异: {load_diff:.1f}%")
-        elif torch.cuda.is_available():
-            print(f"  单GPU模式: {gpu_usage[0]:.2f}GB")
-        
-        # 生成三元组 - 进一步减少数据量并添加进度显示
-        max_training_samples = min(len(expressions), 10000)  # 限制到1万条，5万太慢
-        
-        if len(expressions) > max_training_samples:
-            print(f"⚠️ 数据量过大 ({len(expressions)}), 使用前 {max_training_samples} 条进行训练")
-            training_expressions = expressions[:max_training_samples]
-        else:
-            training_expressions = expressions
+        training_expressions = expressions
         
         print("开始生成三元组...")
         print(f"  生成进度: 0/{len(training_expressions)}", end="")
@@ -668,7 +632,7 @@ class ExpressionPreTrainer:
                 total_grad_norm += grad_norm
                 num_batches += 1
                 
-                if i % (self.batch_size * 20) == 0:  # 更频繁的日志更新
+                if i % (self.batch_size * 100) == 0:  # 更频繁的日志更新
                     avg_grad = total_grad_norm / num_batches if num_batches > 0 else 0
                     
                     # 实时GPU内存监控
@@ -838,24 +802,9 @@ def main():
     # 先生成小量测试数据验证代码
     print("\n=== 步骤1：小规模测试数据验证 ===")
     test_train_expressions = generator.generate_curriculum_dataset(1000)
-    test_val_expressions = generator.generate_curriculum_dataset(200)
-    
-    print(f"测试训练表达式示例:")
-    for i, expr in enumerate(test_train_expressions[:5]):
-        print(f"  {i+1}. {expr}")
     
     # 创建测试预训练器 - 与大规模训练保持一致
-    test_trainer = ExpressionPreTrainer(
-        d_model=256,   # 与大规模训练保持一致
-        nhead=8,       # 与大规模训练保持一致
-        num_layers=6,  # 与大规模训练保持一致
-        batch_size=16, # 小batch size用于测试
-        learning_rate=5e-4,  # 与大规模训练保持一致
-        margin=0.3,
-        use_distributed=False,
-        rank=0,
-        world_size=1
-    )
+    test_trainer = ExpressionPreTrainer()
     
     print("\n开始小规模测试训练...")
     test_trainer.prepare_training_data(test_train_expressions)
@@ -892,17 +841,7 @@ def main():
     random.shuffle(train_expressions)
     
     # 创建大规模预训练器 - 简化模型避免梯度爆炸
-    trainer = ExpressionPreTrainer(
-        d_model=256,   # 降低模型维度
-        nhead=8,       # 减少注意力头
-        num_layers=6,  # 减少层数
-        batch_size=16, # 进一步减少batch size
-        learning_rate=5e-4,  # 显著降低学习率
-        margin=0.3,
-        use_distributed=False,
-        rank=0,
-        world_size=1
-    )
+    trainer = ExpressionPreTrainer()
     
     print(f"\n模型配置:")
     print(f"  - 隐藏维度: {trainer.d_model}")

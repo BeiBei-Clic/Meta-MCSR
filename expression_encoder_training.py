@@ -241,7 +241,7 @@ class ExpressionPreTrainer:
     """表达式嵌入器预训练器（使用三元组损失，支持100M参数模型和多GPU）"""
     
     def __init__(self, d_model=768, nhead=12, num_layers=12, 
-                 batch_size=64, learning_rate=1e-4, max_seq_length=128, margin=0.5,
+                 batch_size=64, learning_rate=1e-3, max_seq_length=128, margin=0.3,
                  use_distributed=False, rank=0, world_size=1):
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.d_model = d_model
@@ -286,6 +286,10 @@ class ExpressionPreTrainer:
         self.optimizer = None
         self.criterion = nn.TripletMarginLoss(margin=margin, p=2)
         self.scaler = torch.amp.GradScaler('cuda')  # 混合精度训练
+        
+        # 梯度监控
+        self.grad_norms = []
+        self.gradient_clip_val = 1.0
         
     def prepare_training_data(self, expressions):
         """准备训练数据"""
@@ -341,36 +345,91 @@ class ExpressionPreTrainer:
             self.triplet_model.parameters(), 
             lr=self.learning_rate,
             weight_decay=0.01,
-            betas=(0.9, 0.999)
+            betas=(0.9, 0.999),
+            eps=1e-8
         )
+    
+    def check_gradients(self):
+        """检查梯度是否正常传播"""
+        total_norm = 0
+        param_count = 0
+        
+        for p in self.triplet_model.parameters():
+            if p.grad is not None:
+                param_norm = p.grad.data.norm(2)
+                total_norm += param_norm.item() ** 2
+                param_count += 1
+        
+        if param_count > 0:
+            total_norm = total_norm ** (1. / 2)
+            self.grad_norms.append(total_norm)
+            
+            # 只保留最近100个梯度范数
+            if len(self.grad_norms) > 100:
+                self.grad_norms.pop(0)
+                
+            return total_norm
+        return 0
         
     def generate_triplets(self, expressions):
-        """生成三元组数据 (anchor, positive, negative)"""
+        """生成三元组数据 (anchor, positive, negative) - 改进版本"""
         triplets = []
         
         for i, anchor_expr in enumerate(expressions):
-            # 正样本：相同或相似的表达式
-            # 这里简化处理：使用相同的表达式作为正样本
-            # 实际应用中可以生成简化版本或代数变换版本
-            if i + 1 < len(expressions):
-                positive_expr = expressions[i + 1]
-            else:
-                positive_expr = anchor_expr
+            # 正样本：生成与anchor相似的表达式
+            positive_expr = self._generate_similar_expression(anchor_expr)
             
-            # 负样本：随机选择不同的表达式
+            # 负样本：随机选择明显不同的表达式
             neg_idx = random.randint(0, len(expressions) - 1)
-            while neg_idx == i:
+            attempts = 0
+            while neg_idx == i and attempts < 10:
                 neg_idx = random.randint(0, len(expressions) - 1)
+                attempts += 1
             negative_expr = expressions[neg_idx]
             
             triplets.append((anchor_expr, positive_expr, negative_expr))
         
         return triplets
     
+    def _generate_similar_expression(self, base_expr):
+        """生成与基准表达式相似的表达式"""
+        base_str = str(base_expr)
+        
+        # 简单的相似性变换
+        import random
+        
+        # 变量替换
+        if 'x1' in base_str and random.random() > 0.3:
+            return base_str.replace('x1', 'x2' if 'x2' in base_str else 'x1')
+        elif 'x2' in base_str and random.random() > 0.3:
+            return base_str.replace('x2', 'x1')
+        
+        # 常数微调
+        if '1.0' in base_str:
+            return base_str.replace('1.0', '1.1' if random.random() > 0.5 else '0.9')
+        elif '2.0' in base_str:
+            return base_str.replace('2.0', '2.1' if random.random() > 0.5 else '1.9')
+        elif '3.0' in base_str:
+            return base_str.replace('3.0', '3.1' if random.random() > 0.5 else '2.9')
+        
+        # 操作符变换
+        if '+' in base_str:
+            return base_str.replace('+', '-', 1)
+        elif '-' in base_str:
+            return base_str.replace('-', '+', 1)
+        elif '*' in base_str and random.random() > 0.5:
+            return base_str.replace('*', '/', 1)
+        elif '/' in base_str and random.random() > 0.5:
+            return base_str.replace('/', '*', 1)
+        
+        # 如果没有找到可替换的，返回原表达式
+        return base_expr
+    
     def train_epoch(self, expressions, epoch):
-        """训练一个epoch（使用三元组损失和混合精度训练）"""
+        """训练一个epoch（使用三元组损失和混合精度训练，添加梯度监控）"""
         self.triplet_model.train()
         total_loss = 0
+        total_grad_norm = 0
         
         # 生成三元组
         triplets = self.generate_triplets(expressions)
@@ -420,29 +479,48 @@ class ExpressionPreTrainer:
             # 混合精度训练
             self.optimizer.zero_grad()
             
-            with torch.amp.autocast('cuda'):
-                anchor_emb, positive_emb, negative_emb = self.triplet_model(
-                    anchor_tensor, positive_tensor, negative_tensor,
-                    anchor_mask_tensor, positive_mask_tensor, negative_mask_tensor
-                )
+            try:
+                with torch.amp.autocast('cuda'):
+                    anchor_emb, positive_emb, negative_emb = self.triplet_model(
+                        anchor_tensor, positive_tensor, negative_tensor,
+                        anchor_mask_tensor, positive_mask_tensor, negative_mask_tensor
+                    )
+                    
+                    # 计算三元组损失
+                    loss = self.criterion(anchor_emb, positive_emb, negative_emb)
                 
-                # 计算三元组损失
-                loss = self.criterion(anchor_emb, positive_emb, negative_emb)
-            
-            # 反向传播
-            self.scaler.scale(loss).backward()
-            self.scaler.unscale_(self.optimizer)
-            torch.nn.utils.clip_grad_norm_(self.triplet_model.parameters(), max_norm=1.0)
-            self.scaler.step(self.optimizer)
-            self.scaler.update()
-            
-            total_loss += loss.item()
-            num_batches += 1
-            
-            if i % (self.batch_size * 5) == 0:
-                print(f"Epoch {epoch}, Batch {i//self.batch_size}, Loss: {loss.item():.4f}, LR: {self.optimizer.param_groups[0]['lr']:.2e}")
+                # 反向传播
+                self.scaler.scale(loss).backward()
+                
+                # 检查梯度
+                grad_norm = self.check_gradients()
+                total_grad_norm += grad_norm
+                
+                # 梯度裁剪
+                self.scaler.unscale_(self.optimizer)
+                torch.nn.utils.clip_grad_norm_(self.triplet_model.parameters(), max_norm=self.gradient_clip_val)
+                self.scaler.step(self.optimizer)
+                self.scaler.update()
+                
+                total_loss += loss.item()
+                num_batches += 1
+                
+                if i % (self.batch_size * 100) == 0:
+                    avg_grad = total_grad_norm / num_batches if num_batches > 0 else 0
+                    print(f"Epoch {epoch}, Batch {i//self.batch_size}, Loss: {loss.item():.4f}, "
+                          f"Grad Norm: {avg_grad:.4f}, LR: {self.optimizer.param_groups[0]['lr']:.2e}")
+                          
+            except Exception as e:
+                print(f"批次训练出错: {e}")
+                continue
         
-        return total_loss / num_batches if num_batches > 0 else 0
+        avg_loss = total_loss / num_batches if num_batches > 0 else 0
+        avg_grad_norm = total_grad_norm / num_batches if num_batches > 0 else 0
+        
+        if num_batches > 0:
+            print(f"  平均梯度范数: {avg_grad_norm:.4f}")
+        
+        return avg_loss
     
     def validate(self, expressions):
         """验证模型（使用三元组损失）"""
@@ -563,8 +641,6 @@ def main():
         else:
             print("📱 单GPU模式")
         
-        
-    
     # 创建表达式生成器
     generator = ExpressionGenerator(max_depth=8, max_variables=6)
     

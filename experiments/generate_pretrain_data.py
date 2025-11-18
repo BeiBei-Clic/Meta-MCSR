@@ -1,17 +1,4 @@
 #!/usr/bin/env python3
-"""
-数据生成脚本
-
-基于Lample和Charton方法的数学表达式生成器
-生成阶段零预训练所需的(表达式, 数据集)对。
-
-整个表达式生成流程包含两个核心部分：
-1. 创造抽象的数学函数：使用"数学乐高积木"随机拼搭生成语法正确且结构多样的数学公式
-2. 为函数生成具体的数值数据点：使用多模态混合分布生成多样化的输入数据
-
-参考文献：Lample, G. & Charton, F. (2020). Deep learning for symbolic mathematics.
-"""
-
 import os
 import sys
 import numpy as np
@@ -913,54 +900,6 @@ def _generate_expression_with_data_specific_dimension(
     
     return False, "", np.array([]), np.array([]), 0
 
-
-def _generate_expression_with_data(
-    function_generator: FunctionGenerator,
-    data_generator: DataGenerator,
-    n_samples_per_expr: int,
-    noise_level: float,
-    max_attempts: int
-) -> Tuple[bool, str, np.ndarray, np.ndarray, int]:
-    """
-    辅助函数：生成一个表达式及其对应的数据集
-    
-    Args:
-        function_generator: 函数生成器
-        data_generator: 数据生成器
-        n_samples_per_expr: 每个表达式的样本数
-        noise_level: 噪声水平
-        max_attempts: 最大重试次数
-        
-    Returns:
-        (是否成功, 表达式字符串, 清洗后的输入数据, 清洗后的输出数据, 维度)
-    """
-    for attempt in range(max_attempts):
-        # 第一部分：创造抽象的数学函数
-        expression_tree, dimension = function_generator.generate_random_function()
-        expression_str = expression_tree.to_string()
-        
-        # 第二部分：为函数生成具体的数值数据
-        X = data_generator.generate_input_points(dimension, n_samples_per_expr)
-        y = data_generator.calculate_output_values(X, expression_tree)
-        
-        # 数据清洗
-        X_clean, y_clean = data_generator.validate_and_clean_data(X, y)
-        
-        # 添加噪声（可选）
-        if noise_level > 0 and len(y_clean) > 0:
-            noise_std = noise_level * np.std(y_clean) if np.std(y_clean) > 0 else noise_level
-            noise = np.random.normal(0, noise_std, len(y_clean))
-            y_clean += noise
-        
-        # 检查是否有足够的数据
-        if len(y_clean) >= n_samples_per_expr * 0.5:  # 至少50%的样本有效
-            return True, expression_str, X_clean, y_clean, dimension
-        else:
-            raise ValueError("有效样本数不足")
-    
-    return False, "", np.array([]), np.array([]), 0
-
-
 def generate_pretrain_dataset(
     n_expressions: int,
     n_samples_per_expr: int,
@@ -1108,31 +1047,11 @@ def save_progress(
     with open(os.path.join(progress_path, 'datasets.txt'), 'w', encoding='utf-8') as f:
         for i, (X, y) in enumerate(datasets):
             f.write(f"=== Expression {i+1} ===\n")
-            f.write(f"Dimension: {dimensions[i]}\n")
             f.write(f"Expression: {expressions[i]}\n")
-            f.write(f"Input data shape: {X.shape}\n")
-            f.write(f"Output data shape: {y.shape}\n")
             f.write(f"Sample input data:\n")
-            for j in range(min(5, len(X))):  # 只保存前5个样本
+            for j in range(len(X)):  # 只保存前5个样本
                 f.write(f"  Sample {j+1}: X={X[j]}, y={y[j]}\n")
-            f.write(f"Input data range: [{np.min(X):.4f}, {np.max(X):.4f}]\n")
-            f.write(f"Output data range: [{np.min(y):.4f}, {np.max(y):.4f}]\n")
             f.write("\n")
-    
-    # 保存维度信息到txt文件
-    with open(os.path.join(progress_path, 'dimensions.txt'), 'w', encoding='utf-8') as f:
-        f.write("Dimension distribution:\n")
-        dim_counts = {}
-        for dim in dimensions:
-            dim_counts[dim] = dim_counts.get(dim, 0) + 1
-        for dim in sorted(dim_counts.keys()):
-            f.write(f"Dimension {dim}: {dim_counts[dim]} expressions\n")
-        f.write(f"\nTotal expressions: {len(dimensions)}\n")
-        
-        f.write("\nAll dimensions:\n")
-        for i, dim in enumerate(dimensions):
-            f.write(f"{i+1}: {dim}D\n")
-
     
     # 保存元数据
     metadata = {
@@ -1140,25 +1059,8 @@ def save_progress(
         'generated_at': str(np.datetime64('now')),
         'expression_count': len(expressions),
         'dataset_count': len(datasets),
-        'dimension_count': len(dimensions),
-        'generation_method': '基于数学乐高积木的随机拼搭方法',
         'max_dimensions': 5,
         'dimension_distribution': get_dimension_distribution(dimensions),
-        'simplification_enabled': True,
-        'file_format': 'txt',
-        'steps': [
-            '1. 确定维度D (1-5个变量)',
-            '2. 构建基本结构骨架 (使用二元运算符)',
-            '3. 填充变量',
-            '4. 增加复杂性 (插入一元运算符)',
-            '5. 引入常数和现实性 (应用仿射变换)',
-            '6. 表达式化简 (使用sympy)'
-        ],
-        'data_generation': [
-            '1. 使用多模态混合分布生成输入数据',
-            '2. 根据表达式树计算输出值',
-            '3. 数据清洗和验证'
-        ]
     }
     
     with open(os.path.join(progress_path, 'metadata.json'), 'w') as f:
@@ -1193,28 +1095,10 @@ def save_progress_silent(
             f.write(f"=== Expression {i+1} ===\n")
             f.write(f"Dimension: {dimensions[i]}\n")
             f.write(f"Expression: {expressions[i]}\n")
-            f.write(f"Input data shape: {X.shape}\n")
-            f.write(f"Output data shape: {y.shape}\n")
             f.write(f"Sample input data:\n")
-            for j in range(min(5, len(X))):  # 只保存前5个样本
+            for j in range(len(X)):  # 只保存前5个样本
                 f.write(f"  Sample {j+1}: X={X[j]}, y={y[j]}\n")
-            f.write(f"Input data range: [{np.min(X):.4f}, {np.max(X):.4f}]\n")
-            f.write(f"Output data range: [{np.min(y):.4f}, {np.max(y):.4f}]\n")
             f.write("\n")
-    
-    # 保存维度信息到txt文件
-    with open(os.path.join(progress_path, 'dimensions.txt'), 'w', encoding='utf-8') as f:
-        f.write("Dimension distribution:\n")
-        dim_counts = {}
-        for dim in dimensions:
-            dim_counts[dim] = dim_counts.get(dim, 0) + 1
-        for dim in sorted(dim_counts.keys()):
-            f.write(f"Dimension {dim}: {dim_counts[dim]} expressions\n")
-        f.write(f"\nTotal expressions: {len(dimensions)}\n")
-        
-        f.write("\nAll dimensions:\n")
-        for i, dim in enumerate(dimensions):
-            f.write(f"{i+1}: {dim}D\n")
     
     # 保存元数据
     metadata = {
@@ -1223,24 +1107,8 @@ def save_progress_silent(
         'expression_count': len(expressions),
         'dataset_count': len(datasets),
         'dimension_count': len(dimensions),
-        'generation_method': '基于数学乐高积木的随机拼搭方法',
         'max_dimensions': 5,
         'dimension_distribution': get_dimension_distribution(dimensions),
-        'simplification_enabled': True,
-        'file_format': 'txt',
-        'steps': [
-            '1. 确定维度D (1-5个变量)',
-            '2. 构建基本结构骨架 (使用二元运算符)',
-            '3. 填充变量',
-            '4. 增加复杂性 (插入一元运算符)',
-            '5. 引入常数和现实性 (应用仿射变换)',
-            '6. 表达式化简 (使用sympy)'
-        ],
-        'data_generation': [
-            '1. 使用多模态混合分布生成输入数据',
-            '2. 根据表达式树计算输出值',
-            '3. 数据清洗和验证'
-        ]
     }
     
     with open(os.path.join(progress_path, 'metadata.json'), 'w') as f:
@@ -1365,26 +1233,6 @@ def analyze_generated_data(expressions: List[str], dimensions: List[int]) -> Dic
 
 def main():
     """主函数"""
-    print("=" * 80)
-    print("基于'数学乐高积木'的数学表达式生成器")
-    print("=" * 80)
-    print()
-    print("核心流程:")
-    print("1. 创造抽象的数学函数 (5个步骤)")
-    print("   • 确定维度D (1-4个变量)")
-    print("   • 构建基本结构骨架 (使用二元运算符)")
-    print("   • 填充变量")
-    print("   • 增加复杂性 (插入一元运算符)")
-    print("   • 引入常数和现实性 (应用仿射变换)")
-    print()
-    print("2. 为函数生成具体的数值数据点")
-    print("   • 使用多模态混合分布生成输入数据")
-    print("   • 根据表达式树计算输出值")
-    print("   • 数据清洗和验证")
-    print()
-    print("目标: 最大化数据的多样性和复杂性，训练Transformer的内化数学'语法'和'语义'")
-    print("=" * 80)
-    
     # 设置日志
     setup_logging()
     logger = logging.getLogger(__name__)
@@ -1414,43 +1262,8 @@ def main():
     
     # 分析生成的数据
     analysis = analyze_generated_data(expressions, dimensions)
-    
-    print("=" * 80)
-    print("生成完成统计:")
-    print("=" * 80)
     print(f"总表达式数: {analysis['total_expressions']:,}")
     print(f"总数据集数: {len(datasets):,}")
-    print()
-    
-    # 维度分布
-    print("维度分布:")
-    for dim, count in sorted(analysis['dimension_distribution'].items()):
-        percentage = count / analysis['total_expressions'] * 100
-        print(f"  {dim}维: {count:,} 个 ({percentage:.1f}%)")
-    print()
-    
-    # 操作符使用统计
-    if analysis['operator_usage']:
-        print("二元操作符使用统计:")
-        for op, count in sorted(analysis['operator_usage'].items()):
-            percentage = count / analysis['total_expressions'] * 100
-            print(f"  {op}: {count:,} 次 ({percentage:.1f}%)")
-        print()
-    
-    # 函数使用统计
-    if analysis['function_usage']:
-        print("函数使用统计:")
-        for func, count in sorted(analysis['function_usage'].items()):
-            percentage = count / analysis['total_expressions'] * 100
-            print(f"  {func}: {count:,} 次 ({percentage:.1f}%)")
-        print()
-    
-    # 复杂度统计
-    complexity = analysis['complexity_stats']
-    print("表达式复杂度统计:")
-    print(f"  最小长度: {complexity['min_length']} 字符")
-    print(f"  最大长度: {complexity['max_length']} 字符")
-    print(f"  平均长度: {complexity['avg_length']:.1f} 字符")
     print()
     
     print(f"数据已保存到: {output_path}")
@@ -1460,7 +1273,6 @@ def main():
     
     print("=" * 80)
     print("✓ 预训练数据生成完成！")
-    print("数据集已准备就绪，可用于训练Transformer模型")
     print("=" * 80)
     
     return 0

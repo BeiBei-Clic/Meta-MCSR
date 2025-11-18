@@ -8,10 +8,11 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset, DataLoader as TorchDataLoader
 from typing import Dict, List, Optional, Tuple, Any
 import pickle
 import os
+import math
 from tqdm import tqdm
 import logging
 from sklearn.model_selection import train_test_split
@@ -48,6 +49,37 @@ class ContrastiveDataset(Dataset):
             data = self.transform(data)
             
         return expression, data
+    
+    @staticmethod
+    def collate_fn(batch):
+        """自定义的collate函数，处理批次数据"""
+        expressions = [item[0] for item in batch]
+        data_tuples = [item[1] for item in batch]
+        
+        # 分离X和y，确保正确处理数据格式
+        X_list = []
+        y_list = []
+        
+        for data_tuple in data_tuples:
+            if isinstance(data_tuple, tuple) and len(data_tuple) == 2:
+                X, y = data_tuple
+                X_list.append(X)
+                y_list.append(y)
+            else:
+                # 如果格式不对，尝试其他方式处理
+                print(f"警告：数据格式异常: {type(data_tuple)}, 内容: {data_tuple}")
+                # 假设数据是 (X, y) 的格式，进行尝试性处理
+                try:
+                    X = data_tuple[0]
+                    y = data_tuple[1]
+                    X_list.append(X)
+                    y_list.append(y)
+                except:
+                    # 如果还是失败，使用默认值
+                    print(f"数据处理失败，跳过此样本")
+                    continue
+        
+        return expressions, X_list, y_list
 
 
 class PretrainPipeline:
@@ -121,16 +153,20 @@ class PretrainPipeline:
     def _create_scheduler(self):
         """创建学习率调度器"""
         if self.config.get('scheduler', {}).get('type') == 'cosine_with_warmup':
-            from transformers import get_cosine_schedule_with_warmup
+            # 本地实现的学习率调度器
+            num_epochs = self.config.get('num_epochs', 10)
+            warmup_steps = self.config.get('warmup_steps', 1000)
             
-            num_training_steps = self.config['num_epochs'] * self.config.get('steps_per_epoch', 1000)
-            num_warmup_steps = self.config.get('warmup_steps', 1000)
+            # 使用 LambdaLR 实现预热
+            def lr_lambda(current_step: int):
+                if current_step < warmup_steps:
+                    return float(current_step) / float(max(1, warmup_steps))
+                else:
+                    # 余弦退火
+                    progress = float(current_step - warmup_steps) / float(max(1, num_epochs * 1000 - warmup_steps))
+                    return 0.5 * (1.0 + math.cos(math.pi * progress))
             
-            scheduler = get_cosine_schedule_with_warmup(
-                self.optimizer,
-                num_warmup_steps=num_warmup_steps,
-                num_training_steps=num_training_steps
-            )
+            scheduler = torch.optim.lr_scheduler.LambdaLR(self.optimizer, lr_lambda)
         else:
             # 使用StepLR作为默认调度器
             scheduler = torch.optim.lr_scheduler.StepLR(
@@ -351,7 +387,7 @@ class PretrainPipeline:
         self.logger.info(f"从 {data_path} 加载了 {len(expressions)} 个预训练样本")
         return expressions, datasets
     
-    def train_epoch(self, dataloader: DataLoader) -> Dict[str, float]:
+    def train_epoch(self, dataloader: TorchDataLoader) -> Dict[str, float]:
         """训练一个epoch"""
         self.expression_encoder.train()
         self.data_encoder.train()
@@ -361,17 +397,17 @@ class PretrainPipeline:
         
         progress_bar = tqdm(dataloader, desc=f"Epoch {self.epoch}")
         
-        for batch_idx, (expressions, datasets) in enumerate(progress_bar):
+        for batch_idx, (expressions, X_list, y_list) in enumerate(progress_bar):
             batch_size = len(expressions)
             
             # 准备数据
-            # 这里需要实现数据加载逻辑
             batch_losses = []
             
             for i in range(batch_size):
                 # 获取表达式和数据
                 expr = expressions[i]
-                X, y = datasets[i]
+                X = X_list[i]
+                y = y_list[i]
                 
                 # 计算损失
                 loss = self._compute_contrastive_loss(expr, (X, y))
@@ -416,13 +452,21 @@ class PretrainPipeline:
         """计算对比学习损失"""
         X, y = data_tuple
         
+        # 确保模型在训练模式以获得梯度
+        self.expression_encoder.train()
+        self.data_encoder.train()
+        
         # 计算嵌入向量
         expr_embedding = self.expression_encoder.encode(expression)
         data_embedding = self.data_encoder.encode(X, y)
         
-        # 转换为张量并添加batch维度
+        # 转换为张量并确保需要梯度
         expr_tensor = torch.FloatTensor(expr_embedding).unsqueeze(0).to(self.device)
         data_tensor = torch.FloatTensor(data_embedding).unsqueeze(0).to(self.device)
+        
+        # 确保张量需要梯度
+        expr_tensor.requires_grad_(True)
+        data_tensor.requires_grad_(True)
         
         # InfoNCE损失需要批次处理，这里使用简化的单样本版本
         # 实际应用中需要构建正负样本对
@@ -438,7 +482,6 @@ class PretrainPipeline:
         self,
         expressions: Optional[List[str]] = None,
         datasets: Optional[List[Tuple[np.ndarray, np.ndarray]]] = None,
-        generate_data: bool = True,
         data_path: Optional[str] = None
     ) -> Dict[str, List[float]]:
         """
@@ -447,30 +490,32 @@ class PretrainPipeline:
         Args:
             expressions: 表达式列表
             datasets: 数据集列表
-            generate_data: 是否生成数据
             data_path: 数据路径
             
         Returns:
             训练历史
         """
-        # 加载或生成数据
+        # 加载数据
         if expressions is None or datasets is None:
-            if data_path and os.path.exists(data_path):
-                expressions, datasets = self.load_pretrain_data(data_path)
-            elif generate_data:
-                expressions, datasets = self.generate_pretrain_data(
-                    n_expressions=self.config.get('n_expressions', 10000),
-                    n_samples_per_expr=self.config.get('n_samples_per_expr', 100),
-                    variables_range=tuple(self.config.get('variables_range', [-5, 5])),
-                    noise_level=self.config.get('noise_level', 0.01),
-                    output_path=self.config.get('output_path', 'data/pretrain/')
-                )
-            else:
-                raise ValueError("需要提供expressions和datasets，或启用数据生成")
+            if not data_path or not os.path.exists(data_path):
+                raise FileNotFoundError(f"数据文件不存在: {data_path}")
+            
+            # 从txt文件加载数据
+            try:
+                from ..utils.data_loader import DataLoader
+                data_loader = DataLoader()
+                expressions, datasets = data_loader.load_from_pretrain_txt(data_path)
+                self.logger.info(f"从 {data_path} 成功加载 {len(expressions)} 个表达式")
+            except Exception as e:
+                self.logger.error(f"从txt文件加载数据失败: {e}")
+                raise
         
         # 分割训练和验证集
-        train_expr, val_expr, train_data, val_data = train_test_split(
-            expressions, datasets, test_size=0.1, random_state=42
+        train_expr, val_expr = train_test_split(
+            expressions, test_size=0.1, random_state=42
+        )
+        train_data, val_data = train_test_split(
+            datasets, test_size=0.1, random_state=42
         )
         
         # 创建数据集
@@ -478,18 +523,20 @@ class PretrainPipeline:
         val_dataset = ContrastiveDataset(val_expr, val_data)
         
         # 创建数据加载器
-        train_loader = DataLoader(
+        train_loader = TorchDataLoader(
             train_dataset,
             batch_size=self.config['batch_size'],
             shuffle=True,
-            num_workers=self.config.get('num_workers', 4)
+            num_workers=self.config.get('num_workers', 0),  # 改为0避免多进程问题
+            collate_fn=ContrastiveDataset.collate_fn
         )
         
-        val_loader = DataLoader(
+        val_loader = TorchDataLoader(
             val_dataset,
             batch_size=self.config['batch_size'],
             shuffle=False,
-            num_workers=self.config.get('num_workers', 4)
+            num_workers=self.config.get('num_workers', 0),  # 改为0避免多进程问题
+            collate_fn=ContrastiveDataset.collate_fn
         )
         
         # 训练循环
@@ -527,7 +574,7 @@ class PretrainPipeline:
             'val_loss': val_history
         }
     
-    def validate(self, dataloader: DataLoader) -> Dict[str, float]:
+    def validate(self, dataloader: TorchDataLoader) -> Dict[str, float]:
         """验证"""
         self.expression_encoder.eval()
         self.data_encoder.eval()
@@ -536,13 +583,14 @@ class PretrainPipeline:
         total_samples = 0
         
         with torch.no_grad():
-            for expressions, datasets in dataloader:
+            for expressions, X_list, y_list in dataloader:
                 batch_size = len(expressions)
                 
                 batch_losses = []
                 for i in range(batch_size):
                     expr = expressions[i]
-                    X, y = datasets[i]
+                    X = X_list[i]
+                    y = y_list[i]
                     
                     loss = self._compute_contrastive_loss(expr, (X, y))
                     batch_losses.append(loss)

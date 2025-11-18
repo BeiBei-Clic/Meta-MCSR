@@ -144,11 +144,31 @@ def main():
             device=device
         )
         
-        # 开始预训练
-        logger.info("开始预训练...")
-        training_history = pretrain_pipeline.fit(
-            generate_data=True
-        )
+        # 设置预训练数据路径
+        pretrain_data_path = "data/pretrain/progress_100000/datasets.txt"
+        
+        # 检查数据文件是否存在
+        if not os.path.exists(pretrain_data_path):
+            logger.warning(f"预训练数据文件不存在: {pretrain_data_path}")
+            logger.info("开始自动生成预训练数据...")
+            
+            # 运行数据生成脚本
+            try:
+                from scripts.generate_pretrain_data import main as generate_data_main
+                generate_data_main()
+                logger.info("预训练数据生成完成")
+                
+                # 再次检查数据文件是否存在
+                if not os.path.exists(pretrain_data_path):
+                    logger.error(f"数据生成后文件仍不存在: {pretrain_data_path}")
+                    raise FileNotFoundError(f"无法生成预训练数据文件: {pretrain_data_path}")
+            except Exception as e:
+                logger.error(f"自动生成数据失败: {e}")
+                raise FileNotFoundError(f"无法生成预训练数据: {e}")
+        
+        logger.info(f"使用预训练数据文件: {pretrain_data_path}")
+        # 开始预训练，从指定文件加载数据
+        training_history = pretrain_pipeline.fit(data_path=pretrain_data_path)
         
         # 保存最终结果
         pretrain_pipeline.save_pretrained()

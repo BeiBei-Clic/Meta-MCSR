@@ -77,34 +77,42 @@ class DataEncoder(nn.Module):
             data = data[:, :self.max_features, :]
             n_features = self.max_features
         
-        # 特征嵌入
-        # data: (batch_size, n_features, n_samples) -> (batch_size, n_features, n_samples, embedding_dim)
-        data_expanded = data.unsqueeze(-1).expand(-1, -1, -1, self.embedding_dim)
-        feature_embeddings = self.feature_embedding(data_expanded)
+        # 对每个特征单独应用线性变换
+        # data: (batch_size, n_features, n_samples)
+        feature_embeddings_list = []
+        for i in range(n_features):
+            # 提取第i个特征 (batch_size, n_samples)
+            feature_i = data[:, i, :]  # (batch_size, n_samples)
+            # 转换为 (batch_size * n_samples, 1)
+            feature_i_flat = feature_i.reshape(-1, 1)
+            # 应用线性变换 (batch_size * n_samples, embedding_dim)
+            feature_i_embedded = self.feature_embedding(feature_i_flat)
+            feature_embeddings_list.append(feature_i_embedded)
+        
+        # 堆叠所有特征 (batch_size * n_samples, n_features, embedding_dim)
+        feature_embeddings = torch.stack(feature_embeddings_list, dim=1)
+        
+        # 重新排列为 (batch_size, n_samples, n_features, embedding_dim)
+        feature_embeddings = feature_embeddings.view(batch_size, n_samples, n_features, self.embedding_dim)
+        
+        # 在样本维度上求平均得到 (batch_size, n_features, embedding_dim)
+        feature_embeddings = feature_embeddings.mean(dim=1)
         
         # 位置编码
-        positions = torch.arange(n_features, device=data.device).unsqueeze(0)
-        position_embeddings = self.position_embedding(positions)
+        positions = torch.arange(n_features, device=data.device).unsqueeze(0)  # (1, n_features)
+        position_embeddings = self.position_embedding(positions)  # (1, n_features, embedding_dim)
         
         # 合并特征和位置嵌入
-        embeddings = feature_embeddings + position_embeddings.unsqueeze(2)
-        
-        # 重新排列维度 (batch_size, n_features, n_samples, embedding_dim) -> (batch_size, n_samples, n_features, embedding_dim)
-        embeddings = embeddings.transpose(2, 3)  # (batch_size, n_features, embedding_dim, n_samples)
-        embeddings = embeddings.transpose(1, 2)  # (batch_size, n_samples, n_features, embedding_dim)
-        embeddings = embeddings.reshape(batch_size * n_samples, n_features, self.embedding_dim)
+        embeddings = feature_embeddings + position_embeddings  # (batch_size, n_features, embedding_dim)
         
         # Transformer编码
-        encoded = self.transformer_encoder(embeddings)
+        encoded = self.transformer_encoder(embeddings)  # (batch_size, n_features, embedding_dim)
         
         # 全局池化
-        pooled = self.global_pool(encoded.transpose(1, 2)).squeeze(-1)  # (batch_size * n_samples, embedding_dim)
+        pooled = self.global_pool(encoded.transpose(1, 2)).squeeze(-1)  # (batch_size, embedding_dim)
         
-        # 重塑回原始batch
-        pooled = pooled.view(batch_size, n_samples, self.embedding_dim)
-        
-        # 再次全局池化
-        final_embedding = self.global_pool(pooled.transpose(1, 2)).squeeze(-1)
+        # 最终嵌入
+        final_embedding = pooled  # (batch_size, embedding_dim)
         
         # 投影和归一化
         projected = self.projection(final_embedding)
@@ -126,12 +134,24 @@ class DataEncoder(nn.Module):
         """
         self.eval()
         with torch.no_grad():
-            # 转换为张量
-            X_tensor = torch.FloatTensor(X)
-            y_tensor = torch.FloatTensor(y).unsqueeze(-1)
+            # 转换为张量并移动到模型设备
+            device = next(self.parameters()).device
+            X_tensor = torch.FloatTensor(X).to(device)
+            y_tensor = torch.FloatTensor(y).unsqueeze(-1).to(device)
             
             # 组合数据和目标
-            data = torch.stack([X_tensor.T, y_tensor.T], dim=0).unsqueeze(0)  # (1, 2, n_samples)
+            # 我们的目标是创建 (n_features + 1, n_samples) 的张量，其中最后一维是目标值
+            # X_tensor: (n_samples, n_features) -> (n_features, n_samples)
+            # y_tensor: (n_samples,) -> (1, n_samples)
+            X_transposed = X_tensor.T  # (n_features, n_samples)
+            y_transposed = y_tensor.reshape(1, -1)  # (1, n_samples)
+            
+            # 确保样本数量匹配
+            assert X_transposed.shape[1] == y_transposed.shape[1], f"样本数量不匹配: X有{X_transposed.shape[1]}个样本, y有{y_transposed.shape[1]}个样本"
+            
+            # 将X和y在特征维度上连接，而不是用stack
+            # 创建一个 (n_features + 1, n_samples) 的张量
+            data = torch.cat([X_transposed, y_transposed], dim=0).unsqueeze(0)  # (1, n_features + 1, n_samples)
             
             # 编码
             embedding = self.forward(data)
@@ -284,12 +304,24 @@ class DeepSetDataEncoder(nn.Module):
         """
         self.eval()
         with torch.no_grad():
-            # 转换为张量
-            X_tensor = torch.FloatTensor(X)
-            y_tensor = torch.FloatTensor(y).unsqueeze(-1)
+            # 转换为张量并移动到模型设备
+            device = next(self.parameters()).device
+            X_tensor = torch.FloatTensor(X).to(device)
+            y_tensor = torch.FloatTensor(y).unsqueeze(-1).to(device)
             
             # 组合数据和目标
-            data = torch.stack([X_tensor.T, y_tensor.T], dim=0).unsqueeze(0)  # (1, 2, n_samples)
+            # 我们的目标是创建 (n_features + 1, n_samples) 的张量，其中最后一维是目标值
+            # X_tensor: (n_samples, n_features) -> (n_features, n_samples)
+            # y_tensor: (n_samples,) -> (1, n_samples)
+            X_transposed = X_tensor.T  # (n_features, n_samples)
+            y_transposed = y_tensor.reshape(1, -1)  # (1, n_samples)
+            
+            # 确保样本数量匹配
+            assert X_transposed.shape[1] == y_transposed.shape[1], f"样本数量不匹配: X有{X_transposed.shape[1]}个样本, y有{y_transposed.shape[1]}个样本"
+            
+            # 将X和y在特征维度上连接，而不是用stack
+            # 创建一个 (n_features + 1, n_samples) 的张量
+            data = torch.cat([X_transposed, y_transposed], dim=0).unsqueeze(0)  # (1, n_features + 1, n_samples)
             
             # 编码
             embedding = self.forward(data)

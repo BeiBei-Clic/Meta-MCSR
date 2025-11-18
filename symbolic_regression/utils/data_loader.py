@@ -134,6 +134,108 @@ class DataLoader:
         
         return SymbolicRegressionDataset(X, y, variables, metadata)
     
+    def load_from_pretrain_txt(
+        self,
+        file_path: str,
+        max_expressions: Optional[int] = None
+    ) -> Tuple[List[str], List[Tuple[np.ndarray, np.ndarray]]]:
+        """
+        从预训练的 datasets.txt 文件加载数据
+        
+        文件格式如下：
+        === Expression 1 ===
+        Expression: exp(x1)
+        Sample input data:
+          Sample 1: X=[2.08269263], y=8.024869995498069
+          Sample 2: X=[3.29458438], y=26.846634573080276
+          ...
+        
+        Args:
+            file_path: 文件路径
+            max_expressions: 最大表达式数量，None表示加载所有
+            
+        Returns:
+            (表达式列表, 数据集列表)
+        """
+        import re
+        
+        expressions = []
+        datasets = []
+        
+        current_expression = None
+        current_data = []
+        
+        with open(file_path, 'r', encoding='utf-8') as f:
+            lines = f.readlines()
+        
+        for line in lines:
+            line = line.strip()
+            
+            # 检查是否是新的表达式开始
+            if line.startswith('=== Expression'):
+                # 保存前一个表达式（如果有）
+                if current_expression is not None and current_data:
+                    X_data = np.array([sample[0] for sample in current_data])
+                    y_data = np.array([sample[1] for sample in current_data])
+                    datasets.append((X_data, y_data))
+                
+                # 检查是否达到最大数量限制
+                if max_expressions and len(expressions) >= max_expressions:
+                    break
+                
+                current_expression = None
+                current_data = []
+                
+            # 解析表达式
+            elif line.startswith('Expression:'):
+                current_expression = line.replace('Expression:', '').strip()
+                expressions.append(current_expression)
+                
+            # 解析数据样本
+            elif line.startswith('Sample') and 'X=' in line and 'y=' in line:
+                # 使用正则表达式提取X和y值
+                # Sample 1: X=[2.08269263], y=8.024869995498069
+                pattern = r'X=\[([^\]]+)\], y=([-\d.]+)'
+                match = re.search(pattern, line)
+                
+                if match:
+                    x_str = match.group(1)
+                    y_str = match.group(2)
+                    
+                    try:
+                        # 解析X值（可能是逗号分隔的多个值）
+                        if ',' in x_str:
+                            x_values = [float(x.strip()) for x in x_str.split(',')]
+                        else:
+                            x_values = [float(x_str)]
+                        
+                        y_value = float(y_str)
+                        
+                        current_data.append((x_values, y_value))
+                        
+                    except ValueError:
+                        # 如果解析失败，跳过这一行
+                        continue
+        
+        # 保存最后一个表达式（如果有）
+        if current_expression is not None and current_data:
+            X_data = np.array([sample[0] for sample in current_data])
+            y_data = np.array([sample[1] for sample in current_data])
+            datasets.append((X_data, y_data))
+        
+        # 验证表达式和数据集数量一致性
+        if len(expressions) != len(datasets):
+            print(f"警告：表达式数量 ({len(expressions)}) 与数据集数量 ({len(datasets)}) 不一致")
+            # 如果数量不一致，取较小的数量以保证配对
+            min_count = min(len(expressions), len(datasets))
+            expressions = expressions[:min_count]
+            datasets = datasets[:min_count]
+            print(f"已截取到 {min_count} 个有效的表达式-数据集对")
+        
+        print(f"成功解析 {len(expressions)} 个表达式，共 {len(datasets)} 个数据集")
+        
+        return expressions, datasets
+
     def load_from_txt(
         self,
         file_path: str,
@@ -307,6 +409,23 @@ class DataLoader:
         else:
             return X_train, X_val, X_test, y_train, y_val, y_test
     
+    def load_and_prepare_pretrain_data(
+        self,
+        data_source: str,
+        max_expressions: Optional[int] = None
+    ) -> Tuple[List[str], List[Tuple[np.ndarray, np.ndarray]]]:
+        """
+        加载并准备预训练数据
+        
+        Args:
+            data_source: 数据源路径
+            max_expressions: 最大表达式数量
+            
+        Returns:
+            (表达式列表, 数据集列表)
+        """
+        return self.load_from_pretrain_txt(data_source, max_expressions)
+
     def load_and_prepare(
         self,
         data_source: Union[str, Dict, np.ndarray],
@@ -332,7 +451,13 @@ class DataLoader:
                 elif data_source.endswith('.npy'):
                     data_type = 'npy'
                 elif data_source.endswith('.txt'):
-                    data_type = 'txt'
+                    # 检查是否是预训练数据格式
+                    with open(data_source, 'r') as f:
+                        first_lines = [f.readline().strip() for _ in range(10)]
+                        if any(line.startswith('=== Expression') for line in first_lines):
+                            data_type = 'pretrain_txt'
+                        else:
+                            data_type = 'txt'
                 else:
                     raise ValueError(f"无法自动检测文件类型: {data_source}")
             elif isinstance(data_source, dict):
@@ -353,6 +478,9 @@ class DataLoader:
                 dataset = self.load_from_npy(data_source, **kwargs)
         elif data_type == 'txt':
             dataset = self.load_from_txt(data_source, **kwargs)
+        elif data_type == 'pretrain_txt':
+            # 对于预训练数据格式，返回原始的表达式和数据集列表
+            return self.load_from_pretrain_txt(data_source, **kwargs)
         elif data_type == 'dict':
             dataset = self.load_from_dict(data_source, **kwargs)
         elif data_type == 'array':

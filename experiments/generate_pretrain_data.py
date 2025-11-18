@@ -752,10 +752,8 @@ def generate_pretrain_dataset(
         (表达式列表, 数据集列表, 维度列表)
     """
     logger = logging.getLogger(__name__)
-    logger.info(f"开始生成 {n_expressions} 个数学表达式的数据集...")
-    logger.info("使用基于'数学乐高积木'的随机拼搭方法：")
-    logger.info("1. 创造抽象的数学函数 (5个步骤)")
-    logger.info("2. 为函数生成具体的数值数据点 (多模态混合分布)")
+    # 开始生成进度条显示（静默开始）
+    logger.info("开始生成数学表达式数据集...")
     
     # 创建输出目录
     os.makedirs(output_path, exist_ok=True)
@@ -775,8 +773,17 @@ def generate_pretrain_dataset(
         success = False
         attempt_count = 0
         
-        # 显示进度条（每50个表达式更新一次）
-        if (i + 1) % 50 == 0 or i == 0:
+        # 显示进度条（优化更新策略，避免视觉堆叠）
+        should_update = False
+        
+        # 更新的条件：前100个每10个更新一次，之后每100个更新一次
+        if i < 100:
+            should_update = (i + 1) % 10 == 0
+        else:
+            should_update = (i + 1) % max(1, n_expressions // 100) == 0
+            
+        # 第一个表达式始终显示进度条
+        if i == 0 or should_update or i == n_expressions - 1:
             progress_bar = create_progress_bar(i + 1, n_expressions)
             elapsed = time.time() - start_time
             if i > 0:
@@ -812,11 +819,9 @@ def generate_pretrain_dataset(
             datasets.append((X_clean, y_clean))
             dimensions.append(dim)
         
-        # 定期保存进度
+        # 定期保存进度（完全静默）
         if (i + 1) % save_interval == 0:
-            save_progress(expressions, datasets, dimensions, output_path, i + 1)
-            if (i + 1) % (save_interval * 5) == 0:  # 只在5倍间隔时记录日志
-                logger.info(f"已生成 {i + 1}/{n_expressions} 个有效表达式")
+            save_progress_silent(expressions, datasets, dimensions, output_path, i + 1)
     
     # 完成进度条
     print()  # 换行
@@ -825,18 +830,7 @@ def generate_pretrain_dataset(
     save_progress(expressions, datasets, dimensions, output_path, len(expressions))
     
     logger.info(f"数据集生成完成！")
-    logger.info(f"总共生成 {len(expressions)} 个有效表达式")
-    logger.info(f"总用时: {(time.time() - start_time)/60:.1f} 分钟")
-    
-    # 统计信息
-    if expressions:
-        dim_counts = {}
-        for dim in dimensions:
-            dim_counts[dim] = dim_counts.get(dim, 0) + 1
-        
-        logger.info("维度分布:")
-        for dim, count in sorted(dim_counts.items()):
-            logger.info(f"  {dim}维: {count} 个 ({count/len(expressions)*100:.1f}%)")
+    # 静默完成（进度条后会有详细统计输出）
     
     return expressions, datasets, dimensions
 
@@ -894,6 +888,58 @@ def save_progress(
     logger.info(f"进度已保存: {progress_path}")
 
 
+def save_progress_silent(
+    expressions: List[str],
+    datasets: List[Tuple[np.ndarray, np.ndarray]],
+    dimensions: List[int],
+    output_path: str,
+    count: int
+):
+    """
+    保存进度（静默版本，不输出任何日志信息）
+    """
+    progress_path = os.path.join(output_path, f'progress_{count}')
+    os.makedirs(progress_path, exist_ok=True)
+    
+    # 保存表达式
+    with open(os.path.join(progress_path, 'expressions.pkl'), 'wb') as f:
+        pickle.dump(expressions, f)
+    
+    # 保存数据集
+    with open(os.path.join(progress_path, 'datasets.pkl'), 'wb') as f:
+        pickle.dump(datasets, f)
+    
+    # 保存维度信息
+    with open(os.path.join(progress_path, 'dimensions.pkl'), 'wb') as f:
+        pickle.dump(dimensions, f)
+    
+    # 保存元数据
+    metadata = {
+        'count': count,
+        'generated_at': str(np.datetime64('now')),
+        'expression_count': len(expressions),
+        'dataset_count': len(datasets),
+        'dimension_count': len(dimensions),
+        'generation_method': '基于数学乐高积木的随机拼搭方法',
+        'steps': [
+            '1. 确定维度D (1-4个变量)',
+            '2. 构建基本结构骨架 (使用二元运算符)',
+            '3. 填充变量',
+            '4. 增加复杂性 (插入一元运算符)',
+            '5. 引入常数和现实性 (应用仿射变换)'
+        ],
+        'data_generation': [
+            '1. 使用多模态混合分布生成输入数据',
+            '2. 根据表达式树计算输出值',
+            '3. 数据清洗和验证'
+        ]
+    }
+    
+    with open(os.path.join(progress_path, 'metadata.json'), 'w') as f:
+        import json
+        json.dump(metadata, f, indent=2)
+
+
 def cleanup_intermediate_progress(output_path: str, final_count: int):
     """
     清理中间进度文件夹，只保留最终完整数据集
@@ -946,10 +992,11 @@ def cleanup_intermediate_progress(output_path: str, final_count: int):
             import shutil
             shutil.rmtree(dir_path)
             
-            logger.info(f"已删除中间文件夹: {dir_name}")
+            
             
         except Exception as e:
             logger.warning(f"删除文件夹 {dir_name} 时出错: {e}")
+        logger.info(f"已删除中间文件夹")
     
     # 转换字节为可读格式
     def format_size(size_bytes):

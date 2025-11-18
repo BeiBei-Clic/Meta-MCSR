@@ -20,10 +20,10 @@ project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
 # 导入项目模块
-from src.symbolic_regression.models.expression_encoder import ExpressionEncoder
-from src.symbolic_regression.models.data_encoder import DataEncoder
-from src.symbolic_regression.training.finetune_loop import FinetuneLoop
-from src.symbolic_regression.utils.data_loader import DataLoader, generate_data
+from symbolic_regression.models.expression_encoder import ExpressionEncoder
+from symbolic_regression.models.data_encoder import DataEncoder
+from symbolic_regression.training.finetune_loop import FinetuneLoop
+from symbolic_regression.utils.data_loader import DataLoader, generate_data
 
 
 def setup_logging():

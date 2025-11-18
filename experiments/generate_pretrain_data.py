@@ -624,10 +624,8 @@ class DataGenerator:
             'mul': safe_multiply
         })
 
-        # 更安全的表达式处理
+        # 安全的表达式处理
         safe_expr = expression_str.replace('^', '**')
-        safe_expr = safe_expr.replace('/', '/div(')  # 使用安全除法
-        safe_expr = safe_expr.replace('*', '/mul(')  # 使用安全乘法
 
         # 尝试分批计算以减少内存压力和溢出风险
         batch_size = min(1000, n_samples)  # 最多1000个样本一批

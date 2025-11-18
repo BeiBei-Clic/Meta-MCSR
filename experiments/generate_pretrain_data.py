@@ -85,14 +85,11 @@ class ExpressionNode:
     
     def _process_constant(self) -> str:
         """处理常数节点"""
-        try:
-            const_value = float(self.value)
-            # 简单的数值范围限制，避免极端值
-            if abs(const_value) > 100:
-                const_value = max(-100, min(100, const_value))
-            elif abs(const_value) < 1e-8:
-                const_value = 1.0
-        except (ValueError, TypeError):
+        const_value = float(self.value)
+        # 简单的数值范围限制，避免极端值
+        if abs(const_value) > 100:
+            const_value = max(-100, min(100, const_value))
+        elif abs(const_value) < 1e-8:
             const_value = 1.0
         
         self.value = str(const_value)
@@ -224,26 +221,22 @@ class FunctionGenerator:
             (表达式树, 维度D) 元组
         """
         for attempt in range(max_retries):
-            try:
-                # 步骤1: 确定维度D (1-3个变量)
-                dimension = random.randint(1, 3)
-                
-                # 步骤2: 搭建结构骨架（构建二元树）
-                tree_structure = self._build_structural_skeleton()
-                
-                # 步骤3: 填充变量到叶节点
-                tree_with_variables = self._fill_variables(tree_structure, dimension)
-                
-                # 步骤4: 增加复杂性（插入一元运算符）
-                complex_tree = self._add_complexity(tree_with_variables)
-                
-                # 步骤5: 引入常数和现实性（应用仿射变换）
-                final_tree = self._apply_affine_transforms(complex_tree)
-                
-                return final_tree, dimension
-                    
-            except Exception:
-                continue
+            # 步骤1: 确定维度D (1-3个变量)
+            dimension = random.randint(1, 3)
+            
+            # 步骤2: 搭建结构骨架（构建二元树）
+            tree_structure = self._build_structural_skeleton()
+            
+            # 步骤3: 填充变量到叶节点
+            tree_with_variables = self._fill_variables(tree_structure, dimension)
+            
+            # 步骤4: 增加复杂性（插入一元运算符）
+            complex_tree = self._add_complexity(tree_with_variables)
+            
+            # 步骤5: 引入常数和现实性（应用仿射变换）
+            final_tree = self._apply_affine_transforms(complex_tree)
+            
+            return final_tree, dimension
         
         # 备用方案
         return self._create_simple_linear_function(1), 1
@@ -568,52 +561,111 @@ class DataGenerator:
             return data
     
     def calculate_output_values(self, X: np.ndarray, expression_tree: ExpressionNode) -> np.ndarray:
-        """根据表达式树计算输出值，保留数据溢出保护"""
-        try:
-            expression_str = expression_tree.to_string()
-            n_samples, dimension = X.shape
-            
-            # 准备变量字典
-            var_dict = {}
-            for i in range(dimension):
-                var_dict[f'x{i+1}'] = X[:, i]
-            
-            # 安全函数（保留溢出保护）
-            def safe_sqrt(x):
-                return np.sqrt(np.maximum(x, 0))  # 防止负数开方
-            
-            def safe_log(x):
-                return np.log(np.maximum(x, 1e-10))  # 防止log(0)
-            
-            def safe_exp(x):
-                return np.exp(np.clip(x, -700, 700))  # 防止指数溢出
-            
-            def safe_pow(base, exponent):
-                base = np.asarray(base)
-                exponent = np.asarray(exponent)
-                return np.power(np.maximum(np.abs(base), 1e-10), exponent)
-            
-            # 添加函数和常数
-            var_dict.update({
-                'sin': np.sin, 'cos': np.cos, 'tan': np.tan,
-                'exp': safe_exp, 'log': safe_log, 'sqrt': safe_sqrt,
-                'abs': np.abs, 'sign': np.sign, 'pi': np.pi, 'e': np.e,
-                'max': np.maximum, 'min': np.minimum, 'pow': safe_pow
-            })
-            
-            # 计算输出值
-            safe_expr = expression_str.replace('^', '**')
-            y = eval(safe_expr, {"__builtins__": {}}, var_dict)
-            
-            # 检查并裁剪异常值
-            y = np.asarray(y)
-            if np.any(np.isnan(y)) or np.any(np.isinf(y)):
-                y = np.clip(y, -1e4, 1e4)
-            
-            return y
-            
-        except Exception:
-            return self._calculate_simple_output(X, expression_tree)
+        """根据表达式树计算输出值，增强的溢出保护"""
+        expression_str = expression_tree.to_string()
+        n_samples, dimension = X.shape
+
+        # 验证输入数据范围
+        if not np.all(np.isfinite(X)):
+            X = np.nan_to_num(X, nan=0.0, posinf=1e4, neginf=-1e4)
+
+        # 准备变量字典
+        var_dict = {}
+        for i in range(dimension):
+            # 确保变量值在合理范围内
+            var_values = np.asarray(X[:, i])
+            var_values = np.clip(var_values, -1e3, 1e3)  # 严格的输入限制
+            var_dict[f'x{i+1}'] = var_values
+
+        # 更严格的安全函数
+        def safe_sqrt(x):
+            x = np.asarray(x)
+            return np.sqrt(np.maximum(x, 0))
+
+        def safe_log(x):
+            x = np.asarray(x)
+            return np.log(np.maximum(x, 1e-10))
+
+        def safe_exp(x):
+            x = np.asarray(x)
+            return np.exp(np.clip(x, -500, 500))  # 更严格的指数限制
+
+        def safe_pow(base, exponent):
+            base = np.asarray(base)
+            exponent = np.asarray(exponent)
+            base = np.clip(np.abs(base), 1e-10, 1e5)  # 限制底数范围
+            exponent = np.clip(exponent, -10, 10)    # 限制指数范围
+            return np.power(base, exponent)
+
+        # 超安全的除法和乘法
+        def safe_divide(a, b):
+            a = np.asarray(a)
+            b = np.asarray(b)
+            return np.where(np.abs(b) > 1e-10, a / b, 0.0)
+
+        def safe_multiply(a, b):
+            a = np.asarray(a)
+            b = np.asarray(b)
+            # 在乘法前裁剪以防止溢出
+            a = np.clip(a, -1e3, 1e3)
+            b = np.clip(b, -1e3, 1e3)
+            return a * b
+
+        # 添加函数和常数
+        var_dict.update({
+            'sin': np.sin, 'cos': np.cos, 'tan': np.tan,
+            'exp': safe_exp, 'log': safe_log, 'sqrt': safe_sqrt,
+            'abs': lambda x: np.abs(np.clip(x, -1e4, 1e4)),
+            'sign': np.sign, 'pi': np.pi, 'e': np.e,
+            'max': lambda x, y: np.maximum(np.clip(x, -1e4, 1e4), np.clip(y, -1e4, 1e4)),
+            'min': lambda x, y: np.minimum(np.clip(x, -1e4, 1e4), np.clip(y, -1e4, 1e4)),
+            'pow': safe_pow,
+            'div': safe_divide,
+            'mul': safe_multiply
+        })
+
+        # 更安全的表达式处理
+        safe_expr = expression_str.replace('^', '**')
+        safe_expr = safe_expr.replace('/', '/div(')  # 使用安全除法
+        safe_expr = safe_expr.replace('*', '/mul(')  # 使用安全乘法
+
+        # 尝试分批计算以减少内存压力和溢出风险
+        batch_size = min(1000, n_samples)  # 最多1000个样本一批
+        y_batches = []
+
+        for i in range(0, n_samples, batch_size):
+            end_idx = min(i + batch_size, n_samples)
+            batch_X = X[i:end_idx]
+            batch_var_dict = var_dict.copy()
+
+            # 更新当前批次的变量值
+            for j in range(dimension):
+                batch_var_dict[f'x{j+1}'] = batch_X[:, j]
+
+            # 为当前批次计算表达式
+            batch_expr = safe_expr
+            for j in range(dimension):
+                batch_expr = batch_expr.replace(f'x{j+1}', f'var_{j+1}')
+                batch_var_dict[f'var_{j+1}'] = batch_X[:, j]
+
+            # 使用安全执行环境
+            batch_y = eval(batch_expr, {"__builtins__": {}}, batch_var_dict)
+            batch_y = np.asarray(batch_y)
+
+            # 立即裁剪批次结果
+            batch_y = np.clip(batch_y, -1e4, 1e4)
+            batch_y = np.nan_to_num(batch_y, nan=0.0, posinf=1e4, neginf=-1e4)
+
+            y_batches.append(batch_y)
+
+        # 合并所有批次结果
+        y = np.concatenate(y_batches) if y_batches else np.zeros(n_samples)
+
+        # 最终安全检查
+        y = np.clip(y, -1e4, 1e4)
+        y = np.nan_to_num(y, nan=0.0, posinf=1e4, neginf=-1e4)
+
+        return y
     
     def _calculate_simple_output(self, X: np.ndarray, expression_tree: ExpressionNode) -> np.ndarray:
         """简化的输出计算（备用方法）"""
@@ -689,42 +741,28 @@ def _generate_expression_with_data(
         (是否成功, 表达式字符串, 清洗后的输入数据, 清洗后的输出数据, 维度)
     """
     for attempt in range(max_attempts):
-        try:
-            # 第一部分：创造抽象的数学函数
-            expression_tree, dimension = function_generator.generate_random_function()
-            expression_str = expression_tree.to_string()
-            
-            # 第二部分：为函数生成具体的数值数据
-            X = data_generator.generate_input_points(dimension, n_samples_per_expr)
-            y = data_generator.calculate_output_values(X, expression_tree)
-            
-            # 数据清洗
-            X_clean, y_clean = data_generator.validate_and_clean_data(X, y)
-            
-            # 添加噪声（可选）
-            if noise_level > 0 and len(y_clean) > 0:
-                noise_std = noise_level * np.std(y_clean) if np.std(y_clean) > 0 else noise_level
-                noise = np.random.normal(0, noise_std, len(y_clean))
-                y_clean += noise
-            
-            # 检查是否有足够的数据
-            if len(y_clean) >= n_samples_per_expr * 0.5:  # 至少50%的样本有效
-                return True, expression_str, X_clean, y_clean, dimension
-            else:
-                raise ValueError("有效样本数不足")
-                
-        except Exception as e:
-            if attempt == max_attempts - 1:
-                # 最后一次尝试失败，使用简单表达式
-                dim = random.randint(1, 2)
-                tree = function_generator._create_simple_linear_function(dim)
-                expression_str = tree.to_string()
-                
-                X = data_generator.generate_input_points(dim, n_samples_per_expr)
-                y = data_generator.calculate_output_values(X, tree)
-                X_clean, y_clean = data_generator.validate_and_clean_data(X, y)
-                
-                return True, expression_str, X_clean, y_clean, dim
+        # 第一部分：创造抽象的数学函数
+        expression_tree, dimension = function_generator.generate_random_function()
+        expression_str = expression_tree.to_string()
+        
+        # 第二部分：为函数生成具体的数值数据
+        X = data_generator.generate_input_points(dimension, n_samples_per_expr)
+        y = data_generator.calculate_output_values(X, expression_tree)
+        
+        # 数据清洗
+        X_clean, y_clean = data_generator.validate_and_clean_data(X, y)
+        
+        # 添加噪声（可选）
+        if noise_level > 0 and len(y_clean) > 0:
+            noise_std = noise_level * np.std(y_clean) if np.std(y_clean) > 0 else noise_level
+            noise = np.random.normal(0, noise_std, len(y_clean))
+            y_clean += noise
+        
+        # 检查是否有足够的数据
+        if len(y_clean) >= n_samples_per_expr * 0.5:  # 至少50%的样本有效
+            return True, expression_str, X_clean, y_clean, dimension
+        else:
+            raise ValueError("有效样本数不足")
     
     return False, "", np.array([]), np.array([]), 0
 
@@ -979,24 +1017,19 @@ def cleanup_intermediate_progress(output_path: str, final_count: int):
     total_size = 0
     for dir_name in dirs_to_remove:
         dir_path = os.path.join(output_path, dir_name)
-        try:
-            # 计算文件夹大小
-            dir_size = sum(
-                os.path.getsize(os.path.join(dir_path, f)) 
-                for f in os.listdir(dir_path) 
-                if os.path.isfile(os.path.join(dir_path, f))
-            )
-            total_size += dir_size
-            
-            # 删除文件夹
-            import shutil
-            shutil.rmtree(dir_path)
-            
-            
-            
-        except Exception as e:
-            logger.warning(f"删除文件夹 {dir_name} 时出错: {e}")
-        logger.info(f"已删除中间文件夹")
+        # 计算文件夹大小
+        dir_size = sum(
+            os.path.getsize(os.path.join(dir_path, f)) 
+            for f in os.listdir(dir_path) 
+            if os.path.isfile(os.path.join(dir_path, f))
+        )
+        total_size += dir_size
+        
+        # 删除文件夹
+        import shutil
+        shutil.rmtree(dir_path)
+
+    logger.info(f"已删除中间文件夹")
     
     # 转换字节为可读格式
     def format_size(size_bytes):
@@ -1099,77 +1132,69 @@ def main():
     print(f"输出路径: {output_path}")
     print()
     
-    try:
-        # 生成数据集
-        expressions, datasets, dimensions = generate_pretrain_dataset(
-            n_expressions=n_expressions,
-            n_samples_per_expr=n_samples_per_expr,
-            output_path=output_path,
-            noise_level=noise_level
-        )
-        
-        print()  # 确保进度条后有换行
-        
-        # 分析生成的数据
-        analysis = analyze_generated_data(expressions, dimensions)
-        
-        print("=" * 80)
-        print("生成完成统计:")
-        print("=" * 80)
-        print(f"总表达式数: {analysis['total_expressions']:,}")
-        print(f"总数据集数: {len(datasets):,}")
-        print()
-        
-        # 维度分布
-        print("维度分布:")
-        for dim, count in sorted(analysis['dimension_distribution'].items()):
+    # 生成数据集
+    expressions, datasets, dimensions = generate_pretrain_dataset(
+        n_expressions=n_expressions,
+        n_samples_per_expr=n_samples_per_expr,
+        output_path=output_path,
+        noise_level=noise_level
+    )
+    
+    print()  # 确保进度条后有换行
+    
+    # 分析生成的数据
+    analysis = analyze_generated_data(expressions, dimensions)
+    
+    print("=" * 80)
+    print("生成完成统计:")
+    print("=" * 80)
+    print(f"总表达式数: {analysis['total_expressions']:,}")
+    print(f"总数据集数: {len(datasets):,}")
+    print()
+    
+    # 维度分布
+    print("维度分布:")
+    for dim, count in sorted(analysis['dimension_distribution'].items()):
+        percentage = count / analysis['total_expressions'] * 100
+        print(f"  {dim}维: {count:,} 个 ({percentage:.1f}%)")
+    print()
+    
+    # 操作符使用统计
+    if analysis['operator_usage']:
+        print("二元操作符使用统计:")
+        for op, count in sorted(analysis['operator_usage'].items()):
             percentage = count / analysis['total_expressions'] * 100
-            print(f"  {dim}维: {count:,} 个 ({percentage:.1f}%)")
+            print(f"  {op}: {count:,} 次 ({percentage:.1f}%)")
         print()
-        
-        # 操作符使用统计
-        if analysis['operator_usage']:
-            print("二元操作符使用统计:")
-            for op, count in sorted(analysis['operator_usage'].items()):
-                percentage = count / analysis['total_expressions'] * 100
-                print(f"  {op}: {count:,} 次 ({percentage:.1f}%)")
-            print()
-        
-        # 函数使用统计
-        if analysis['function_usage']:
-            print("函数使用统计:")
-            for func, count in sorted(analysis['function_usage'].items()):
-                percentage = count / analysis['total_expressions'] * 100
-                print(f"  {func}: {count:,} 次 ({percentage:.1f}%)")
-            print()
-        
-        # 复杂度统计
-        complexity = analysis['complexity_stats']
-        print("表达式复杂度统计:")
-        print(f"  最小长度: {complexity['min_length']} 字符")
-        print(f"  最大长度: {complexity['max_length']} 字符")
-        print(f"  平均长度: {complexity['avg_length']:.1f} 字符")
+    
+    # 函数使用统计
+    if analysis['function_usage']:
+        print("函数使用统计:")
+        for func, count in sorted(analysis['function_usage'].items()):
+            percentage = count / analysis['total_expressions'] * 100
+            print(f"  {func}: {count:,} 次 ({percentage:.1f}%)")
         print()
+    
+    # 复杂度统计
+    complexity = analysis['complexity_stats']
+    print("表达式复杂度统计:")
+    print(f"  最小长度: {complexity['min_length']} 字符")
+    print(f"  最大长度: {complexity['max_length']} 字符")
+    print(f"  平均长度: {complexity['avg_length']:.1f} 字符")
+    print()
+    
+    print(f"数据已保存到: {output_path}")
+    
+    # 清理中间进度文件夹
+    cleanup_intermediate_progress(output_path, len(expressions))
+    
+    print("=" * 80)
+    print("✓ 预训练数据生成完成！")
+    print("数据集已准备就绪，可用于训练Transformer模型")
+    print("=" * 80)
+    
+    return 0
         
-        print(f"数据已保存到: {output_path}")
-        
-        # 清理中间进度文件夹
-        cleanup_intermediate_progress(output_path, len(expressions))
-        
-        print("=" * 80)
-        print("✓ 预训练数据生成完成！")
-        print("数据集已准备就绪，可用于训练Transformer模型")
-        print("=" * 80)
-        
-        return 0
-        
-    except Exception as e:
-        logger.error(f"数据生成过程中出现错误: {e}")
-        import traceback
-        traceback.print_exc()
-        return 1
-
-
 if __name__ == "__main__":
     exit_code = main()
     sys.exit(exit_code)

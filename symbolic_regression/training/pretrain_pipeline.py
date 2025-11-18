@@ -152,29 +152,14 @@ class PretrainPipeline:
     
     def _create_scheduler(self):
         """创建学习率调度器"""
-        if self.config.get('scheduler', {}).get('type') == 'cosine_with_warmup':
-            # 本地实现的学习率调度器
-            num_epochs = self.config.get('num_epochs', 10)
-            warmup_steps = self.config.get('warmup_steps', 1000)
-            
-            # 使用 LambdaLR 实现预热
-            def lr_lambda(current_step: int):
-                if current_step < warmup_steps:
-                    return float(current_step) / float(max(1, warmup_steps))
-                else:
-                    # 余弦退火
-                    progress = float(current_step - warmup_steps) / float(max(1, num_epochs * 1000 - warmup_steps))
-                    return 0.5 * (1.0 + math.cos(math.pi * progress))
-            
-            scheduler = torch.optim.lr_scheduler.LambdaLR(self.optimizer, lr_lambda)
-        else:
-            # 使用StepLR作为默认调度器
-            scheduler = torch.optim.lr_scheduler.StepLR(
-                self.optimizer,
-                step_size=20,
-                gamma=0.1
-            )
-            
+        # 使用更简单的调度器，避免复杂的学习率计算
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            self.optimizer,
+            mode='min',
+            factor=0.5,
+            patience=5,
+            min_lr=1e-7
+        )
         return scheduler
     
     def _setup_logging(self):
@@ -427,7 +412,7 @@ class PretrainPipeline:
             )
             
             self.optimizer.step()
-            self.scheduler.step()
+            # 注意：对于ReduceLROnPlateau调度器，我们不在这里调用step()
             
             # 统计
             total_loss += batch_loss.item() * batch_size
@@ -436,7 +421,7 @@ class PretrainPipeline:
             # 更新进度条
             progress_bar.set_postfix({
                 'Loss': f'{batch_loss.item():.4f}',
-                'LR': f'{self.scheduler.get_last_lr()[0]:.2e}'
+                'LR': f'{self.optimizer.param_groups[0]["lr"]:.2e}'
             })
             
             self.global_step += 1
@@ -445,37 +430,35 @@ class PretrainPipeline:
         return {'loss': avg_loss}
     
     def _compute_contrastive_loss(
-        self, 
-        expression: str, 
+        self,
+        expression: str,
         data_tuple: Tuple[np.ndarray, np.ndarray]
     ) -> torch.Tensor:
         """计算对比学习损失"""
         X, y = data_tuple
-        
+
         # 确保模型在训练模式以获得梯度
         self.expression_encoder.train()
         self.data_encoder.train()
-        
-        # 计算嵌入向量
-        expr_embedding = self.expression_encoder.encode(expression)
-        data_embedding = self.data_encoder.encode(X, y)
-        
-        # 转换为张量并确保需要梯度
-        expr_tensor = torch.FloatTensor(expr_embedding).unsqueeze(0).to(self.device)
-        data_tensor = torch.FloatTensor(data_embedding).unsqueeze(0).to(self.device)
-        
-        # 确保张量需要梯度
-        expr_tensor.requires_grad_(True)
-        data_tensor.requires_grad_(True)
-        
-        # InfoNCE损失需要批次处理，这里使用简化的单样本版本
-        # 实际应用中需要构建正负样本对
-        similarity = F.cosine_similarity(expr_tensor, data_tensor)
-        
-        # 将相似度转换为损失
-        # 对于正样本，我们希望相似度越高越好，所以损失 = -similarity
-        loss = -similarity / self.temperature
-        
+
+        # 将数据转换为张量
+        X_tensor = torch.FloatTensor(X).to(self.device)
+        y_tensor = torch.FloatTensor(y).to(self.device)
+
+        # 计算嵌入向量 - 直接使用模型输出，保持梯度跟踪
+        expr_embedding = self.expression_encoder.encode(expression, training=True)
+        data_embedding = self.data_encoder.encode(X_tensor, y_tensor)
+
+        # 添加批次维度
+        expr_embedding = expr_embedding.unsqueeze(0)  # (1, embedding_dim)
+        data_embedding = data_embedding.unsqueeze(0)  # (1, embedding_dim)
+
+        # 计算余弦相似度
+        similarity = F.cosine_similarity(expr_embedding, data_embedding)
+
+        # 将相似度转换为损失 - 对于正样本，我们希望相似度越高越好
+        loss = -similarity.mean() / self.temperature
+
         return loss
     
     def fit(
@@ -555,13 +538,17 @@ class PretrainPipeline:
             # 验证
             val_metrics = self.validate(val_loader)
             val_history['loss'].append(val_metrics['loss'])
-            
+
+            # 更新学习率调度器
+            self.scheduler.step(val_metrics['loss'])
+
             # 记录日志
             self.logger.info(
                 f"Epoch {epoch}: Train Loss = {train_metrics['loss']:.4f}, "
-                f"Val Loss = {val_metrics['loss']:.4f}"
+                f"Val Loss = {val_metrics['loss']:.4f}, "
+                f"LR = {self.scheduler.get_last_lr()[0]:.2e}"
             )
-            
+
             # 保存最佳模型
             if val_metrics['loss'] < self.best_loss:
                 self.best_loss = val_metrics['loss']

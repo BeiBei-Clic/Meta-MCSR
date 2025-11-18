@@ -299,47 +299,47 @@ class ExpressionEncoder(nn.Module):
         
         return projected
     
-    def encode(self, expression: str) -> np.ndarray:
+    def encode(self, expression: str, training: bool = False) -> torch.Tensor:
         """
         编码单个表达式
-        
+
         Args:
             expression: 数学表达式字符串
-            
+            training: 是否在训练模式下（影响是否计算梯度）
+
         Returns:
             归一化的嵌入向量
         """
-        self.eval()
-        with torch.no_grad():
-            # 分词
-            tokenizer = ExpressionTokenizer()
-            encoded = tokenizer.tokenize_expression(expression)
-            
-            # 将张量移动到模型所在的设备
-            device = next(self.parameters()).device
-            input_ids = encoded['input_ids'].unsqueeze(0).to(device)
-            attention_mask = encoded['attention_mask'].unsqueeze(0).to(device)
-            
-            # 确保模型可以处理当前词汇表大小
-            if hasattr(self, 'token_embedding'):
-                vocab_size = self.token_embedding.num_embeddings
-                max_id = input_ids.max().item()
-                if max_id >= vocab_size:
-                    # 扩展 embedding 层
-                    new_num_embeddings = max_id + 1
-                    old_state_dict = self.state_dict()
-                    self.token_embedding = nn.Embedding(new_num_embeddings, self.embedding_dim).to(device)
-                    # 复制旧权重
-                    old_size = min(old_state_dict['token_embedding.weight'].shape[0], new_num_embeddings)
-                    self.token_embedding.weight.data[:old_size] = old_state_dict['token_embedding.weight'][:old_size]
-                    # 重新初始化新权重
-                    nn.init.normal_(self.token_embedding.weight[old_size:], mean=0, std=0.02)
-            
-            # 编码
-            embedding = self.forward(input_ids, attention_mask)
-            embedding = F.normalize(embedding, p=2, dim=1)
-            
-            return embedding.squeeze(0).cpu().numpy()
+        self.train()
+        # 分词
+        tokenizer = ExpressionTokenizer()
+        encoded = tokenizer.tokenize_expression(expression)
+
+        # 将张量移动到模型所在的设备
+        device = next(self.parameters()).device
+        input_ids = encoded['input_ids'].unsqueeze(0).to(device)
+        attention_mask = encoded['attention_mask'].unsqueeze(0).to(device)
+
+        # 确保模型可以处理当前词汇表大小
+        if hasattr(self, 'token_embedding'):
+            vocab_size = self.token_embedding.num_embeddings
+            max_id = input_ids.max().item()
+            if max_id >= vocab_size:
+                # 扩展 embedding 层
+                new_num_embeddings = max_id + 1
+                old_state_dict = self.state_dict()
+                self.token_embedding = nn.Embedding(new_num_embeddings, self.embedding_dim).to(device)
+                # 复制旧权重
+                old_size = min(old_state_dict['token_embedding.weight'].shape[0], new_num_embeddings)
+                self.token_embedding.weight.data[:old_size] = old_state_dict['token_embedding.weight'][:old_size]
+                # 重新初始化新权重
+                nn.init.normal_(self.token_embedding.weight[old_size:], mean=0, std=0.02)
+
+        # 编码
+        embedding = self.forward(input_ids, attention_mask)
+        embedding = F.normalize(embedding, p=2, dim=1)
+
+        return embedding.squeeze(0)  # 返回张量而不是numpy数组
     
     def save_pretrained(self, save_directory: str):
         """保存预训练权重"""

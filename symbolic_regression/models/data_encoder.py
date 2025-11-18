@@ -121,7 +121,7 @@ class DataEncoder(nn.Module):
         
         return projected
     
-    def encode(self, X: np.ndarray, y: np.ndarray) -> np.ndarray:
+    def encode(self, X: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
         """
         编码数据集
         
@@ -132,32 +132,32 @@ class DataEncoder(nn.Module):
         Returns:
             归一化的数据嵌入向量
         """
-        self.eval()
-        with torch.no_grad():
-            # 转换为张量并移动到模型设备
-            device = next(self.parameters()).device
-            X_tensor = torch.FloatTensor(X).to(device)
-            y_tensor = torch.FloatTensor(y).unsqueeze(-1).to(device)
-            
-            # 组合数据和目标
-            # 我们的目标是创建 (n_features + 1, n_samples) 的张量，其中最后一维是目标值
-            # X_tensor: (n_samples, n_features) -> (n_features, n_samples)
-            # y_tensor: (n_samples,) -> (1, n_samples)
-            X_transposed = X_tensor.T  # (n_features, n_samples)
-            y_transposed = y_tensor.reshape(1, -1)  # (1, n_samples)
-            
-            # 确保样本数量匹配
-            assert X_transposed.shape[1] == y_transposed.shape[1], f"样本数量不匹配: X有{X_transposed.shape[1]}个样本, y有{y_transposed.shape[1]}个样本"
-            
-            # 将X和y在特征维度上连接，而不是用stack
-            # 创建一个 (n_features + 1, n_samples) 的张量
-            data = torch.cat([X_transposed, y_transposed], dim=0).unsqueeze(0)  # (1, n_features + 1, n_samples)
-            
-            # 编码
-            embedding = self.forward(data)
-            embedding = F.normalize(embedding, p=2, dim=1)
-            
-            return embedding.squeeze(0).cpu().numpy()
+        self.train()
+
+        # 确保数据在正确的设备上
+        device = next(self.parameters()).device
+        X = X.to(device)
+        y = y.to(device)
+
+        # 组合数据和目标
+        # 我们的目标是创建 (n_features + 1, n_samples) 的张量，其中最后一维是目标值
+        # X: (n_samples, n_features) -> (n_features, n_samples)
+        # y: (n_samples,) -> (1, n_samples)
+        X_transposed = X.T  # (n_features, n_samples)
+        y_transposed = y.unsqueeze(0)  # (1, n_samples)
+
+        # 确保样本数量匹配
+        assert X_transposed.shape[1] == y_transposed.shape[1], f"样本数量不匹配: X有{X_transposed.shape[1]}个样本, y有{y_transposed.shape[1]}个样本"
+
+        # 将X和y在特征维度上连接
+        # 创建一个 (n_features + 1, n_samples) 的张量
+        data = torch.cat([X_transposed, y_transposed], dim=0).unsqueeze(0)  # (1, n_features + 1, n_samples)
+
+        # 编码
+        embedding = self.forward(data)
+        embedding = F.normalize(embedding, p=2, dim=1)
+
+        return embedding.squeeze(0)  # 返回张量
     
     def save_pretrained(self, save_directory: str):
         """保存预训练权重"""
@@ -291,7 +291,7 @@ class DeepSetDataEncoder(nn.Module):
         
         return projected
     
-    def encode(self, X: np.ndarray, y: np.ndarray) -> np.ndarray:
+    def encode(self, X: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
         """
         编码数据集
         
@@ -302,29 +302,29 @@ class DeepSetDataEncoder(nn.Module):
         Returns:
             归一化的数据嵌入向量
         """
-        self.eval()
-        with torch.no_grad():
-            # 转换为张量并移动到模型设备
-            device = next(self.parameters()).device
-            X_tensor = torch.FloatTensor(X).to(device)
-            y_tensor = torch.FloatTensor(y).unsqueeze(-1).to(device)
-            
-            # 组合数据和目标
-            # 我们的目标是创建 (n_features + 1, n_samples) 的张量，其中最后一维是目标值
-            # X_tensor: (n_samples, n_features) -> (n_features, n_samples)
-            # y_tensor: (n_samples,) -> (1, n_samples)
-            X_transposed = X_tensor.T  # (n_features, n_samples)
-            y_transposed = y_tensor.reshape(1, -1)  # (1, n_samples)
-            
-            # 确保样本数量匹配
-            assert X_transposed.shape[1] == y_transposed.shape[1], f"样本数量不匹配: X有{X_transposed.shape[1]}个样本, y有{y_transposed.shape[1]}个样本"
-            
-            # 将X和y在特征维度上连接，而不是用stack
-            # 创建一个 (n_features + 1, n_samples) 的张量
-            data = torch.cat([X_transposed, y_transposed], dim=0).unsqueeze(0)  # (1, n_features + 1, n_samples)
-            
-            # 编码
-            embedding = self.forward(data)
-            embedding = F.normalize(embedding, p=2, dim=1)
-            
-            return embedding.squeeze(0).cpu().numpy()
+        self.train()
+
+        # 确保数据在正确的设备上
+        device = next(self.parameters()).device
+        X = X.to(device)
+        y = y.to(device)
+
+        # 组合数据和目标
+        # 我们的目标是创建 (n_features + 1, n_samples) 的张量，其中最后一维是目标值
+        # X: (n_samples, n_features) -> (n_features, n_samples)
+        # y: (n_samples,) -> (1, n_samples)
+        X_transposed = X.T  # (n_features, n_samples)
+        y_transposed = y.unsqueeze(0)  # (1, n_samples)
+
+        # 确保样本数量匹配
+        assert X_transposed.shape[1] == y_transposed.shape[1], f"样本数量不匹配: X有{X_transposed.shape[1]}个样本, y有{y_transposed.shape[1]}个样本"
+
+        # 将X和y在特征维度上连接
+        # 创建一个 (n_features + 1, n_samples) 的张量
+        data = torch.cat([X_transposed, y_transposed], dim=0).unsqueeze(0)  # (1, n_features + 1, n_samples)
+
+        # 编码
+        embedding = self.forward(data)
+        embedding = F.normalize(embedding, p=2, dim=1)
+
+        return embedding.squeeze(0)  # 返回张量

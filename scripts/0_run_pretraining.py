@@ -81,9 +81,9 @@ def get_default_config() -> Dict[str, Any]:
                 'variables_range': [-5, 5],
                 'noise_level': 0.01,
                 'batch_size': 32,
-                'learning_rate': 1e-4,
+                'learning_rate': 0.0001,  # 确保是数字类型
                 'num_epochs': 10,  # 减少epochs以便快速测试
-                'weight_decay': 1e-4,
+                'weight_decay': 0.0001,  # 确保是数字类型
                 'warmup_steps': 1000,
                 'output_dir': 'models_weights/pretrained/'
             }

@@ -89,27 +89,31 @@ class PretrainPipeline:
         
     def _create_optimizer(self):
         """创建优化器"""
+        # 确保学习率和权重衰减是数字类型
+        learning_rate = float(self.config.get('learning_rate', 1e-4))
+        weight_decay = float(self.config.get('weight_decay', 1e-4))
+        
         # 为两个编码器创建联合优化器
         param_groups = [
-            {'params': self.expression_encoder.parameters(), 'lr': self.config['learning_rate']},
-            {'params': self.data_encoder.parameters(), 'lr': self.config['learning_rate']}
+            {'params': self.expression_encoder.parameters(), 'lr': learning_rate},
+            {'params': self.data_encoder.parameters(), 'lr': learning_rate}
         ]
         
         if self.config.get('optimizer', {}).get('type', 'adamw') == 'adamw':
             optimizer = torch.optim.AdamW(
                 param_groups,
-                lr=self.config['learning_rate'],
+                lr=learning_rate,
                 betas=(0.9, 0.999),
                 eps=1e-8,
-                weight_decay=self.config.get('weight_decay', 1e-4)
+                weight_decay=weight_decay
             )
         else:
             optimizer = torch.optim.Adam(
                 param_groups,
-                lr=self.config['learning_rate'],
+                lr=learning_rate,
                 betas=(0.9, 0.999),
                 eps=1e-8,
-                weight_decay=self.config.get('weight_decay', 1e-4)
+                weight_decay=weight_decay
             )
             
         return optimizer
@@ -269,10 +273,8 @@ class PretrainPipeline:
         noise_level: float
     ) -> Tuple[np.ndarray, np.ndarray]:
         """根据表达式生成数据"""
-        # 导入nd2py包
-        sys_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), '..', '..')
-        sys.path.append(sys_path)
-        import nd2py as nd
+        import sys
+        import os
         
         # 变量范围
         x1_range = variables_range
@@ -282,13 +284,9 @@ class PretrainPipeline:
         x1 = np.random.uniform(x1_range[0], x1_range[1], n_samples)
         x2 = np.random.uniform(x2_range[0], x2_range[1], n_samples)
         
-        # 准备输入字典
-        X_dict = {'x1': x1, 'x2': x2}
-        
         # 解析并评估表达式
         try:
-            # 这里需要根据实际的nd2py语法来解析表达式
-            # 暂时使用简单的eval方式，实际应用中需要更严格的解析
+            # 处理表达式字符串
             expr_str = expression.replace('^', '**')
             
             # 安全的表达式求值（仅允许特定函数）
@@ -461,11 +459,11 @@ class PretrainPipeline:
                 expressions, datasets = self.load_pretrain_data(data_path)
             elif generate_data:
                 expressions, datasets = self.generate_pretrain_data(
-                    n_expressions=self.config['n_expressions'],
-                    n_samples_per_expr=self.config['n_samples_per_expr'],
-                    variables_range=tuple(self.config['variables_range']),
-                    noise_level=self.config['noise_level'],
-                    output_path=self.config['output_path']
+                    n_expressions=self.config.get('n_expressions', 10000),
+                    n_samples_per_expr=self.config.get('n_samples_per_expr', 100),
+                    variables_range=tuple(self.config.get('variables_range', [-5, 5])),
+                    noise_level=self.config.get('noise_level', 0.01),
+                    output_path=self.config.get('output_path', 'data/pretrain/')
                 )
             else:
                 raise ValueError("需要提供expressions和datasets，或启用数据生成")

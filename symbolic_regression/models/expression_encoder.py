@@ -99,19 +99,30 @@ class ExpressionEncoder(nn.Module):
         self.embedding_dim = embedding_dim
         self.projection_dim = projection_dim or embedding_dim
         
-        # 加载预训练的Transformer模型
-        self.transformer = AutoModel.from_pretrained("microsoft/DialoGPT-medium")
+        # 创建随机初始化的Transformer模型
+        from transformers import GPT2Config, GPT2Model
         
-        # 调整transformer配置
-        config = self.transformer.config
-        config.hidden_size = embedding_dim
-        config.num_attention_heads = n_heads
-        config.num_hidden_layers = n_layers
-        config.max_position_embeddings = max_seq_length
-        config.hidden_dropout_prob = dropout
+        config = GPT2Config(
+            vocab_size=50006,  # 基础词汇表大小
+            hidden_size=embedding_dim,
+            num_hidden_layers=n_layers,
+            num_attention_heads=n_heads,
+            max_position_embeddings=max_seq_length,
+            hidden_dropout_prob=dropout,
+            attention_probs_dropout_prob=dropout,
+            layer_norm_epsilon=1e-5,
+            initializer_range=0.02,
+            summary_type="cls_index",
+            summary_use_proj=True,
+            summary_activation="gelu",
+            summary_first_dropout=dropout,
+            pad_token_id=0
+        )
         
-        # 重新配置模型
-        self.transformer.resize_token_embeddings(50006)  # 添加特殊token
+        self.transformer = GPT2Model(config)
+        
+        # 调整token embedding大小以包含特殊token
+        self.transformer.resize_token_embeddings(50006)
         
         # 投影层
         self.projection = nn.Linear(embedding_dim, self.projection_dim)

@@ -26,6 +26,8 @@ from dataclasses import dataclass
 from enum import Enum
 import ast
 import math
+import sympy as sp
+from sympy import simplify, expand, factor, apart
 
 # 添加项目路径
 project_root = Path(__file__).parent.parent
@@ -221,8 +223,8 @@ class FunctionGenerator:
             (表达式树, 维度D) 元组
         """
         for attempt in range(max_retries):
-            # 步骤1: 确定维度D (1-3个变量)
-            dimension = random.randint(1, 3)
+            # 步骤1: 确定维度D (1-5个变量)
+            dimension = random.randint(1, 5)
             
             # 步骤2: 搭建结构骨架（构建二元树）
             tree_structure = self._build_structural_skeleton()
@@ -236,10 +238,47 @@ class FunctionGenerator:
             # 步骤5: 引入常数和现实性（应用仿射变换）
             final_tree = self._apply_affine_transforms(complex_tree)
             
-            return final_tree, dimension
+            # 步骤6: 表达式化简
+            simplified_tree = self._simplify_expression(final_tree)
+            
+            return simplified_tree, dimension
         
         # 备用方案
         return self._create_simple_linear_function(1), 1
+    
+    def generate_random_function_specific_dimension(self, target_dimension: int, max_retries: int = 10) -> Tuple[ExpressionNode, int]:
+        """
+        生成指定维度的数学函数
+        
+        Args:
+            target_dimension: 目标维度
+            max_retries: 最大重试次数
+            
+        Returns:
+            (表达式树, 维度D) 元组
+        """
+        for attempt in range(max_retries):
+            dimension = target_dimension
+            
+            # 步骤2: 搭建结构骨架（构建二元树）
+            tree_structure = self._build_structural_skeleton()
+            
+            # 步骤3: 填充变量到叶节点
+            tree_with_variables = self._fill_variables(tree_structure, dimension)
+            
+            # 步骤4: 增加复杂性（插入一元运算符）
+            complex_tree = self._add_complexity(tree_with_variables)
+            
+            # 步骤5: 引入常数和现实性（应用仿射变换）
+            final_tree = self._apply_affine_transforms(complex_tree)
+            
+            # 步骤6: 表达式化简
+            simplified_tree = self._simplify_expression(final_tree)
+            
+            return simplified_tree, dimension
+        
+        # 备用方案
+        return self._create_simple_linear_function(target_dimension), target_dimension
     
     def _build_structural_skeleton(self) -> ExpressionNode:
         """步骤2: 搭建结构骨架（构建二元树）
@@ -428,8 +467,44 @@ class FunctionGenerator:
     def _validate_expression(self, tree: ExpressionNode) -> bool:
         """简单的表达式验证"""
         return (tree.count_nodes() > 0 and 
-                len(tree.get_variables()) <= 3 and 
+                len(tree.get_variables()) <= 5 and 
                 tree.count_nodes() <= 15)
+
+    def _simplify_expression(self, tree: ExpressionNode) -> ExpressionNode:
+        """步骤6: 表达式化简"""
+        try:
+            # 将表达式树转换为字符串
+            expr_str = tree.to_string()
+            
+            # 使用sympy解析和化简表达式
+            # 创建符号变量
+            x_vars = sp.symbols('x1 x2 x3 x4 x5')
+            var_dict = {f'x{i+1}': x_vars[i] for i in range(5)}
+            
+            # 替换表达式中的函数名以匹配sympy语法
+            sympy_expr_str = expr_str
+            sympy_expr_str = sympy_expr_str.replace('**', '^')
+            sympy_expr_str = sympy_expr_str.replace('sin', 'sin')
+            sympy_expr_str = sympy_expr_str.replace('cos', 'cos')
+            sympy_expr_str = sympy_expr_str.replace('exp', 'exp')
+            sympy_expr_str = sympy_expr_str.replace('log', 'log')
+            sympy_expr_str = sympy_expr_str.replace('sqrt', 'sqrt')
+            
+            # 解析表达式
+            sympy_expr = sympify_safe(sympy_expr_str, var_dict)
+            
+            # 化简表达式
+            simplified = simplify(sympy_expr)
+            
+            # 如果化简后的表达式不为空，则转换回表达式树
+            if simplified != sympy_expr:
+                return self._sympy_to_expression_tree(simplified, var_dict)
+            else:
+                return tree
+                
+        except Exception:
+            # 如果化简失败，返回原始表达式
+            return tree
     
     def _create_simple_linear_function(self, dimension: int) -> ExpressionNode:
         """创建简单的线性函数作为备用方案"""
@@ -458,6 +533,78 @@ class FunctionGenerator:
                     right=ExpressionNode(node_type=NodeType.VARIABLE, value=f"x{i}")
                 )
             return left
+
+    def sympify_safe(self, expr_str: str, var_dict: Dict[str, Any]) -> sp.Expr:
+        """安全的sympy解析函数"""
+        try:
+            # 处理常见的数学函数
+            safe_functions = {
+                'sin': sp.sin,
+                'cos': sp.cos,
+                'tan': sp.tan,
+                'exp': sp.exp,
+                'log': sp.log,
+                'sqrt': sp.sqrt,
+                'abs': sp.Abs,
+                '^': '**'
+            }
+            
+            # 替换运算符
+            processed_expr = expr_str.replace('^', '**')
+            
+            # 安全的eval环境
+            safe_dict = {
+                'sin': sp.sin,
+                'cos': sp.cos,
+                'tan': sp.tan,
+                'exp': sp.exp,
+                'log': sp.log,
+                'sqrt': sp.sqrt,
+                'abs': sp.Abs,
+                'pi': sp.pi,
+                'e': sp.E,
+                **var_dict
+            }
+            
+            return sp.sympify(processed_expr, locals=safe_dict)
+        except Exception:
+            # 如果解析失败，返回原始字符串的符号化版本
+            return sp.sympify(expr_str.replace('^', '**'))
+
+    def _sympy_to_expression_tree(self, sympy_expr: sp.Expr, var_dict: Dict[str, Any]) -> ExpressionNode:
+        """将sympy表达式转换回表达式树"""
+        try:
+            if isinstance(sympy_expr, sp.Symbol):
+                var_name = str(sympy_expr)
+                return ExpressionNode(node_type=NodeType.VARIABLE, value=var_name)
+            elif isinstance(sympy_expr, sp.Number):
+                return ExpressionNode(node_type=NodeType.CONSTANT, value=str(float(sympy_expr)))
+            elif isinstance(sympy_expr, sp.Add):
+                # 处理加法
+                left = self._sympy_to_expression_tree(sympy_expr.args[0], var_dict)
+                right = self._sympy_to_expression_tree(sympy_expr.args[1], var_dict)
+                return ExpressionNode(node_type=NodeType.BINARY, value="+", left=left, right=right)
+            elif isinstance(sympy_expr, sp.Mul):
+                # 处理乘法
+                left = self._sympy_to_expression_tree(sympy_expr.args[0], var_dict)
+                right = self._sympy_to_expression_tree(sympy_expr.args[1], var_dict)
+                return ExpressionNode(node_type=NodeType.BINARY, value="*", left=left, right=right)
+            elif isinstance(sympy_expr, sp.Pow):
+                # 处理幂运算
+                left = self._sympy_to_expression_tree(sympy_expr.base, var_dict)
+                right = self._sympy_to_expression_tree(sympy_expr.exp, var_dict)
+                return ExpressionNode(node_type=NodeType.BINARY, value="^", left=left, right=right)
+            elif hasattr(sympy_expr, 'func') and sympy_expr.func in [sp.sin, sp.cos, sp.exp, sp.log, sp.sqrt]:
+                # 处理一元函数
+                func_name = sympy_expr.func.__name__
+                child = self._sympy_to_expression_tree(sympy_expr.args[0], var_dict)
+                return ExpressionNode(node_type=NodeType.UNARY, value=func_name, child=child)
+            else:
+                # 未知类型，返回常数节点
+                return ExpressionNode(node_type=NodeType.CONSTANT, value="1.0")
+        except Exception:
+            # 如果转换失败，返回一个简单的常数节点
+            return ExpressionNode(node_type=NodeType.CONSTANT, value="1.0")
 
 
 class DataGenerator:
@@ -718,6 +865,55 @@ def create_progress_bar(current, total, width=50):
     return f"|{bar}| {current}/{total} ({percent:.1f}%)"
 
 
+def _generate_expression_with_data_specific_dimension(
+    function_generator: FunctionGenerator,
+    data_generator: DataGenerator,
+    n_samples_per_expr: int,
+    noise_level: float,
+    max_attempts: int,
+    target_dimension: int
+) -> Tuple[bool, str, np.ndarray, np.ndarray, int]:
+    """
+    辅助函数：生成特定维度的表达式及其对应的数据集
+    
+    Args:
+        function_generator: 函数生成器
+        data_generator: 数据生成器
+        n_samples_per_expr: 每个表达式的样本数
+        noise_level: 噪声水平
+        max_attempts: 最大重试次数
+        target_dimension: 目标维度
+        
+    Returns:
+        (是否成功, 表达式字符串, 清洗后的输入数据, 清洗后的输出数据, 维度)
+    """
+    for attempt in range(max_attempts):
+        # 生成指定维度的表达式
+        expression_tree, dimension = function_generator.generate_random_function_specific_dimension(target_dimension)
+        expression_str = expression_tree.to_string()
+        
+        # 为函数生成具体的数值数据
+        X = data_generator.generate_input_points(dimension, n_samples_per_expr)
+        y = data_generator.calculate_output_values(X, expression_tree)
+        
+        # 数据清洗
+        X_clean, y_clean = data_generator.validate_and_clean_data(X, y)
+        
+        # 添加噪声（可选）
+        if noise_level > 0 and len(y_clean) > 0:
+            noise_std = noise_level * np.std(y_clean) if np.std(y_clean) > 0 else noise_level
+            noise = np.random.normal(0, noise_std, len(y_clean))
+            y_clean += noise
+        
+        # 检查是否有足够的数据
+        if len(y_clean) >= n_samples_per_expr * 0.5:  # 至少50%的样本有效
+            return True, expression_str, X_clean, y_clean, dimension
+        else:
+            raise ValueError("有效样本数不足")
+    
+    return False, "", np.array([]), np.array([]), 0
+
+
 def _generate_expression_with_data(
     function_generator: FunctionGenerator,
     data_generator: DataGenerator,
@@ -771,7 +967,8 @@ def generate_pretrain_dataset(
     output_path: str,
     noise_level: float = 0.01,
     save_interval: int = 1000,
-    progress_callback: Optional[callable] = None
+    progress_callback: Optional[callable] = None,
+    max_dimensions: int = 5
 ) -> Tuple[List[str], List[Tuple[np.ndarray, np.ndarray]], List[int]]:
     """
     生成预训练数据集 - 使用新的基于"数学乐高积木"的生成方法
@@ -802,58 +999,70 @@ def generate_pretrain_dataset(
     datasets = []
     dimensions = []
     
+    # 计算每个维度的表达式数量（均等分配）
+    expressions_per_dimension = n_expressions // max_dimensions
+    remainder = n_expressions % max_dimensions
+    dimension_counts = [expressions_per_dimension] * max_dimensions
+    for i in range(remainder):
+        dimension_counts[i] += 1
+    
     start_time = time.time()
     
-    # 生成表达式和数据
-    for i in range(n_expressions):
-        success = False
-        attempt_count = 0
+    # 按维度生成表达式和数据
+    target_dimension = 1
+    for current_dim in range(1, max_dimensions + 1):
+        dim_target_count = dimension_counts[current_dim - 1]
         
-        # 显示进度条（优化更新策略，避免视觉堆叠）
-        should_update = False
-        
-        # 更新的条件：前100个每10个更新一次，之后每100个更新一次
-        if i < 100:
-            should_update = (i + 1) % 10 == 0
-        else:
-            should_update = (i + 1) % max(1, n_expressions // 100) == 0
+        for i in range(dim_target_count):
+            global_idx = sum(dimension_counts[:current_dim-1]) + i
+            success = False
+            attempt_count = 0
             
-        # 第一个表达式始终显示进度条
-        if i == 0 or should_update or i == n_expressions - 1:
-            progress_bar = create_progress_bar(i + 1, n_expressions)
-            elapsed = time.time() - start_time
-            if i > 0:
-                eta = (elapsed / (i + 1)) * (n_expressions - i - 1)
-                eta_str = f", ETA: {eta/60:.1f}分钟"
+            # 显示进度条（优化更新策略，避免视觉堆叠）
+            should_update = False
+            
+            # 更新的条件：前100个每10个更新一次，之后每100个更新一次
+            if global_idx < 100:
+                should_update = (global_idx + 1) % 10 == 0
             else:
-                eta_str = ""
-            print(f"\r{progress_bar}{eta_str}", end="", flush=True)
-        
-        # 限制重试次数，避免无限循环
-        max_attempts = min(30, max(5, n_expressions // 10))  # 动态调整重试次数
-        
-        # 尝试生成表达式和数据
-        success, expression_str, X_clean, y_clean, dim = _generate_expression_with_data(
-            function_generator, data_generator, n_samples_per_expr, noise_level, max_attempts
-        )
-        
-        # 如果成功生成，添加到结果中
-        if success:
-            expressions.append(expression_str)
-            datasets.append((X_clean, y_clean))
-            dimensions.append(dim)
-        else:
-            # 如果所有尝试都失败，强制添加一个简单表达式
-            dim = 1
-            tree = function_generator._create_simple_linear_function(dim)
-            expression_str = tree.to_string()
-            X = data_generator.generate_input_points(dim, n_samples_per_expr)
-            y = data_generator.calculate_output_values(X, tree)
-            X_clean, y_clean = data_generator.validate_and_clean_data(X, y)
+                should_update = (global_idx + 1) % max(1, n_expressions // 100) == 0
+                
+            # 第一个表达式始终显示进度条
+            if global_idx == 0 or should_update or global_idx == n_expressions - 1:
+                progress_bar = create_progress_bar(global_idx + 1, n_expressions)
+                elapsed = time.time() - start_time
+                if global_idx > 0:
+                    eta = (elapsed / (global_idx + 1)) * (n_expressions - global_idx - 1)
+                    eta_str = f", ETA: {eta/60:.1f}分钟"
+                else:
+                    eta_str = ""
+                print(f"\r{progress_bar}{eta_str}", end="", flush=True)
             
-            expressions.append(expression_str)
-            datasets.append((X_clean, y_clean))
-            dimensions.append(dim)
+            # 限制重试次数，避免无限循环
+            max_attempts = min(30, max(5, n_expressions // 10))  # 动态调整重试次数
+            
+            # 尝试生成表达式和数据
+            success, expression_str, X_clean, y_clean, dim = _generate_expression_with_data_specific_dimension(
+                function_generator, data_generator, n_samples_per_expr, noise_level, max_attempts, current_dim
+            )
+            
+            # 如果成功生成，添加到结果中
+            if success:
+                expressions.append(expression_str)
+                datasets.append((X_clean, y_clean))
+                dimensions.append(dim)
+            else:
+                # 如果所有尝试都失败，强制添加一个简单表达式
+                dim = current_dim
+                tree = function_generator._create_simple_linear_function(dim)
+                expression_str = tree.to_string()
+                X = data_generator.generate_input_points(dim, n_samples_per_expr)
+                y = data_generator.calculate_output_values(X, tree)
+                X_clean, y_clean = data_generator.validate_and_clean_data(X, y)
+                
+                expressions.append(expression_str)
+                datasets.append((X_clean, y_clean))
+                dimensions.append(dim)
         
         # 定期保存进度（完全静默）
         if (i + 1) % save_interval == 0:
@@ -871,6 +1080,14 @@ def generate_pretrain_dataset(
     return expressions, datasets, dimensions
 
 
+def get_dimension_distribution(dimensions: List[int]) -> Dict[int, int]:
+    """获取维度分布"""
+    dim_counts = {}
+    for dim in dimensions:
+        dim_counts[dim] = dim_counts.get(dim, 0) + 1
+    return dim_counts
+
+
 def save_progress(
     expressions: List[str],
     datasets: List[Tuple[np.ndarray, np.ndarray]],
@@ -882,17 +1099,40 @@ def save_progress(
     progress_path = os.path.join(output_path, f'progress_{count}')
     os.makedirs(progress_path, exist_ok=True)
     
-    # 保存表达式
-    with open(os.path.join(progress_path, 'expressions.pkl'), 'wb') as f:
-        pickle.dump(expressions, f)
+    # 保存表达式到txt文件
+    with open(os.path.join(progress_path, 'expressions.txt'), 'w', encoding='utf-8') as f:
+        for i, expr in enumerate(expressions):
+            f.write(f"{i+1}: {expr}\n")
     
-    # 保存数据集
-    with open(os.path.join(progress_path, 'datasets.pkl'), 'wb') as f:
-        pickle.dump(datasets, f)
+    # 保存数据集到txt文件
+    with open(os.path.join(progress_path, 'datasets.txt'), 'w', encoding='utf-8') as f:
+        for i, (X, y) in enumerate(datasets):
+            f.write(f"=== Expression {i+1} ===\n")
+            f.write(f"Dimension: {dimensions[i]}\n")
+            f.write(f"Expression: {expressions[i]}\n")
+            f.write(f"Input data shape: {X.shape}\n")
+            f.write(f"Output data shape: {y.shape}\n")
+            f.write(f"Sample input data:\n")
+            for j in range(min(5, len(X))):  # 只保存前5个样本
+                f.write(f"  Sample {j+1}: X={X[j]}, y={y[j]}\n")
+            f.write(f"Input data range: [{np.min(X):.4f}, {np.max(X):.4f}]\n")
+            f.write(f"Output data range: [{np.min(y):.4f}, {np.max(y):.4f}]\n")
+            f.write("\n")
     
-    # 保存维度信息
-    with open(os.path.join(progress_path, 'dimensions.pkl'), 'wb') as f:
-        pickle.dump(dimensions, f)
+    # 保存维度信息到txt文件
+    with open(os.path.join(progress_path, 'dimensions.txt'), 'w', encoding='utf-8') as f:
+        f.write("Dimension distribution:\n")
+        dim_counts = {}
+        for dim in dimensions:
+            dim_counts[dim] = dim_counts.get(dim, 0) + 1
+        for dim in sorted(dim_counts.keys()):
+            f.write(f"Dimension {dim}: {dim_counts[dim]} expressions\n")
+        f.write(f"\nTotal expressions: {len(dimensions)}\n")
+        
+        f.write("\nAll dimensions:\n")
+        for i, dim in enumerate(dimensions):
+            f.write(f"{i+1}: {dim}D\n")
+
     
     # 保存元数据
     metadata = {
@@ -902,12 +1142,17 @@ def save_progress(
         'dataset_count': len(datasets),
         'dimension_count': len(dimensions),
         'generation_method': '基于数学乐高积木的随机拼搭方法',
+        'max_dimensions': 5,
+        'dimension_distribution': get_dimension_distribution(dimensions),
+        'simplification_enabled': True,
+        'file_format': 'txt',
         'steps': [
-            '1. 确定维度D (1-4个变量)',
+            '1. 确定维度D (1-5个变量)',
             '2. 构建基本结构骨架 (使用二元运算符)',
             '3. 填充变量',
             '4. 增加复杂性 (插入一元运算符)',
-            '5. 引入常数和现实性 (应用仿射变换)'
+            '5. 引入常数和现实性 (应用仿射变换)',
+            '6. 表达式化简 (使用sympy)'
         ],
         'data_generation': [
             '1. 使用多模态混合分布生成输入数据',
@@ -937,17 +1182,39 @@ def save_progress_silent(
     progress_path = os.path.join(output_path, f'progress_{count}')
     os.makedirs(progress_path, exist_ok=True)
     
-    # 保存表达式
-    with open(os.path.join(progress_path, 'expressions.pkl'), 'wb') as f:
-        pickle.dump(expressions, f)
+    # 保存表达式到txt文件
+    with open(os.path.join(progress_path, 'expressions.txt'), 'w', encoding='utf-8') as f:
+        for i, expr in enumerate(expressions):
+            f.write(f"{i+1}: {expr}\n")
     
-    # 保存数据集
-    with open(os.path.join(progress_path, 'datasets.pkl'), 'wb') as f:
-        pickle.dump(datasets, f)
+    # 保存数据集到txt文件
+    with open(os.path.join(progress_path, 'datasets.txt'), 'w', encoding='utf-8') as f:
+        for i, (X, y) in enumerate(datasets):
+            f.write(f"=== Expression {i+1} ===\n")
+            f.write(f"Dimension: {dimensions[i]}\n")
+            f.write(f"Expression: {expressions[i]}\n")
+            f.write(f"Input data shape: {X.shape}\n")
+            f.write(f"Output data shape: {y.shape}\n")
+            f.write(f"Sample input data:\n")
+            for j in range(min(5, len(X))):  # 只保存前5个样本
+                f.write(f"  Sample {j+1}: X={X[j]}, y={y[j]}\n")
+            f.write(f"Input data range: [{np.min(X):.4f}, {np.max(X):.4f}]\n")
+            f.write(f"Output data range: [{np.min(y):.4f}, {np.max(y):.4f}]\n")
+            f.write("\n")
     
-    # 保存维度信息
-    with open(os.path.join(progress_path, 'dimensions.pkl'), 'wb') as f:
-        pickle.dump(dimensions, f)
+    # 保存维度信息到txt文件
+    with open(os.path.join(progress_path, 'dimensions.txt'), 'w', encoding='utf-8') as f:
+        f.write("Dimension distribution:\n")
+        dim_counts = {}
+        for dim in dimensions:
+            dim_counts[dim] = dim_counts.get(dim, 0) + 1
+        for dim in sorted(dim_counts.keys()):
+            f.write(f"Dimension {dim}: {dim_counts[dim]} expressions\n")
+        f.write(f"\nTotal expressions: {len(dimensions)}\n")
+        
+        f.write("\nAll dimensions:\n")
+        for i, dim in enumerate(dimensions):
+            f.write(f"{i+1}: {dim}D\n")
     
     # 保存元数据
     metadata = {
@@ -957,12 +1224,17 @@ def save_progress_silent(
         'dataset_count': len(datasets),
         'dimension_count': len(dimensions),
         'generation_method': '基于数学乐高积木的随机拼搭方法',
+        'max_dimensions': 5,
+        'dimension_distribution': get_dimension_distribution(dimensions),
+        'simplification_enabled': True,
+        'file_format': 'txt',
         'steps': [
-            '1. 确定维度D (1-4个变量)',
+            '1. 确定维度D (1-5个变量)',
             '2. 构建基本结构骨架 (使用二元运算符)',
             '3. 填充变量',
             '4. 增加复杂性 (插入一元运算符)',
-            '5. 引入常数和现实性 (应用仿射变换)'
+            '5. 引入常数和现实性 (应用仿射变换)',
+            '6. 表达式化简 (使用sympy)'
         ],
         'data_generation': [
             '1. 使用多模态混合分布生成输入数据',

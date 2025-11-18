@@ -406,6 +406,78 @@ def save_progress(
         json.dump(metadata, f, indent=2)
 
 
+def cleanup_intermediate_progress(output_path: str, final_count: int):
+    """
+    清理中间进度文件夹，只保留最终完整数据集
+    
+    Args:
+        output_path: 输出路径
+        final_count: 最终的数据量
+    """
+    logger = logging.getLogger(__name__)
+    
+    if not os.path.exists(output_path):
+        return
+    
+    # 获取所有progress文件夹
+    progress_dirs = []
+    for item in os.listdir(output_path):
+        item_path = os.path.join(output_path, item)
+        if os.path.isdir(item_path) and item.startswith('progress_'):
+            progress_dirs.append(item)
+    
+    if not progress_dirs:
+        return
+    
+    # 统计要删除的文件夹
+    dirs_to_remove = []
+    final_dir = f'progress_{final_count}'
+    
+    for dir_name in progress_dirs:
+        if dir_name != final_dir:
+            dirs_to_remove.append(dir_name)
+    
+    if not dirs_to_remove:
+        logger.info("没有中间文件夹需要清理")
+        return
+    
+    # 删除中间文件夹
+    total_size = 0
+    for dir_name in dirs_to_remove:
+        dir_path = os.path.join(output_path, dir_name)
+        try:
+            # 计算文件夹大小
+            dir_size = sum(
+                os.path.getsize(os.path.join(dir_path, f)) 
+                for f in os.listdir(dir_path) 
+                if os.path.isfile(os.path.join(dir_path, f))
+            )
+            total_size += dir_size
+            
+            # 删除文件夹
+            import shutil
+            shutil.rmtree(dir_path)
+            
+            logger.info(f"已删除中间文件夹: {dir_name}")
+            
+        except Exception as e:
+            logger.warning(f"删除文件夹 {dir_name} 时出错: {e}")
+    
+    # 转换字节为可读格式
+    def format_size(size_bytes):
+        if size_bytes == 0:
+            return "0B"
+        size_names = ["B", "KB", "MB", "GB"]
+        import math
+        i = int(math.floor(math.log(size_bytes, 1024)))
+        p = math.pow(1024, i)
+        s = round(size_bytes / p, 2)
+        return f"{s} {size_names[i]}"
+    
+    logger.info(f"清理完成! 删除了 {len(dirs_to_remove)} 个中间文件夹，节省空间: {format_size(total_size)}")
+    logger.info(f"保留最终数据集: {final_dir} (包含 {final_count} 个表达式)")
+
+
 def main():
     """主函数"""
     print("=" * 60)
@@ -469,6 +541,10 @@ def main():
                 print(f"  {func}: {count} ({count/len(expressions)*100:.1f}%)")
         
         print(f"\n数据已保存到: {output_path}")
+        
+        # 清理中间进度文件夹，只保留最终完整数据集
+        cleanup_intermediate_progress(output_path, len(expressions))
+        
         print("=" * 60)
         
         return 0

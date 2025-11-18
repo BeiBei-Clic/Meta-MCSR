@@ -106,57 +106,74 @@ class ExpressionGenerator:
                 return op(left, right)
     
     def generate_dataset(self, num_expressions=10000):
-        """生成数据集"""
-        expressions = []
+        """生成数据集（带去重机制）"""
+        expressions = set()
         
-        for i in range(num_expressions):
-            expr = self.generate_expression()
-            expressions.append(str(expr))
+        print(f"开始生成 {num_expressions:,} 个唯一表达式...")
+        
+        while len(expressions) < num_expressions:
+            expr = str(self.generate_expression())
+            expressions.add(expr)
             
-            if i % 1000 == 0:
-                print(f"生成进度: {i}/{num_expressions}")
+            if len(expressions) % 10000 == 0:
+                print(f"  生成进度: {len(expressions)}/{num_expressions}")
         
+        expressions = list(expressions)
+        print(f"数据集生成完成！总计 {len(expressions):,} 个唯一表达式")
         return expressions
     
-    def generate_curriculum_dataset(self, num_expressions=100000):
-        """生成大规模课程学习数据集"""
-        expressions = []
+    def generate_curriculum_dataset(self, num_expressions=100000, rank=0):
+        """生成大规模课程学习数据集（带去重机制）"""
+        expressions = set()
         
-        print(f"开始生成 {num_expressions:,} 个表达式...")
+        print(f"开始生成 {num_expressions:,} 个唯一表达式...")
         
         # 阶段1：简单表达式 (25%)
-        simple_count = int(num_expressions * 0.25)
-        print(f"生成简单表达式: {simple_count:,} 个")
-        for i in range(simple_count):
-            expr = self._generate_recursive(random.randint(1, 2), allow_special=False)
-            expressions.append(str(expr))
+        target_simple = int(num_expressions * 0.25)
+        print(f"生成简单表达式: {target_simple:,} 个")
+        while len(expressions) < target_simple:
+            expr = str(self._generate_recursive(random.randint(1, 2), allow_special=False))
+            expressions.add(expr)
+            if len(expressions) % 10000 == 0:
+                print(f"  进度: {len(expressions)}/{target_simple}")
         
         # 阶段2：中等复杂度表达式 (35%)
-        medium_count = int(num_expressions * 0.35)
-        print(f"生成中等复杂度表达式: {medium_count:,} 个")
-        for i in range(medium_count):
-            expr = self._generate_recursive(random.randint(2, 4), allow_special=False)
-            expressions.append(str(expr))
+        target_medium = int(num_expressions * 0.35)
+        print(f"生成中等复杂度表达式: {target_medium:,} 个")
+        while len(expressions) < target_simple + target_medium:
+            expr = str(self._generate_recursive(random.randint(2, 4), allow_special=False))
+            expressions.add(expr)
+            current = len(expressions) - target_simple
+            if current % 10000 == 0:
+                print(f"  进度: {current}/{target_medium}")
         
         # 阶段3：复杂表达式 (25%)
-        complex_count = int(num_expressions * 0.25)
-        print(f"生成复杂表达式: {complex_count:,} 个")
-        for i in range(complex_count):
-            expr = self._generate_recursive(random.randint(4, 6), allow_special=False)
-            expressions.append(str(expr))
+        target_complex = int(num_expressions * 0.25)
+        print(f"生成复杂表达式: {target_complex:,} 个")
+        while len(expressions) < target_simple + target_medium + target_complex:
+            expr = str(self._generate_recursive(random.randint(4, 6), allow_special=False))
+            expressions.add(expr)
+            current = len(expressions) - target_simple - target_medium
+            if current % 10000 == 0:
+                print(f"  进度: {current}/{target_complex}")
         
         # 阶段4：超复杂表达式 (15%)
-        super_count = num_expressions - simple_count - medium_count - complex_count
-        print(f"生成超复杂表达式: {super_count:,} 个")
-        for i in range(super_count):
+        remaining_total = num_expressions - (target_simple + target_medium + target_complex)
+        print(f"生成超复杂表达式: {remaining_total:,} 个")
+        while len(expressions) < num_expressions:
             depth = random.randint(5, self.max_depth)
-            expr = self._generate_recursive(depth, allow_special=False)
-            expressions.append(str(expr))
+            expr = str(self._generate_recursive(depth, allow_special=False))
+            expressions.add(expr)
+            current = len(expressions) - target_simple - target_medium - target_complex
+            if current % 10000 == 0:
+                print(f"  进度: {current}/{remaining_total}")
         
-        # 打乱数据
+        # 转换为列表并打乱
+        expressions = list(expressions)
         random.shuffle(expressions)
         
-        print(f"数据集生成完成！总计 {len(expressions):,} 个表达式")
+        print(f"数据集生成完成！总计 {len(expressions):,} 个唯一表达式")
+        
         return expressions
     
     def generate_specialized_datasets(self):

@@ -1,0 +1,123 @@
+# 基于对比学习预训练与真实解引导微调的MCTS集成框架配置
+
+# 数据配置
+data:
+  # 预训练数据生成
+  pretrain:
+    n_expressions: 1000000  # 预训练表达式数量
+    n_samples_per_expr: 100  # 每个表达式的数据点数量
+    variables_range: [-5, 5]  # 变量取值范围
+    noise_level: 0.01  # 噪声水平
+    output_path: "data/pretrain/"
+  
+  # 在线微调数据
+  online_finetune:
+    n_samples: 1000  # 微调数据点数量
+    variables_range: [-5, 5]
+    noise_level: 0.01
+    output_path: "data/online_finetune/"
+  
+  # 实战数据
+  production:
+    n_samples: 1000
+    variables_range: [-5, 5]
+    noise_level: 0.01
+    output_path: "data/production/"
+
+# 模型配置
+model:
+  # 表达式编码器
+  expression_encoder:
+    embedding_dim: 512
+    n_heads: 8
+    n_layers: 6
+    dropout: 0.1
+    max_seq_length: 128
+  
+  # 数据编码器
+  data_encoder:
+    embedding_dim: 512
+    n_heads: 8
+    n_layers: 6
+    dropout: 0.1
+    max_features: 100
+  
+  # 对比学习配置
+  contrastive:
+    temperature: 0.07
+    projection_dim: 256
+
+# MCTS配置
+mcts:
+  max_depth: 12
+  max_iterations: 1000
+  max_variables: 5
+  exploration_constant: 1.4
+  simulation_count: 10
+  
+  # 奖励权重
+  reward_weights:
+    structure_alignment: 0.3  # 结构对齐奖励
+    data_alignment: 0.4       # 数据对齐奖励
+    accuracy: 0.3             # 真实精度奖励
+
+# 训练配置
+training:
+  # 预训练配置
+  pretrain:
+    batch_size: 32
+    learning_rate: 1e-4
+    num_epochs: 100
+    weight_decay: 1e-4
+    warmup_steps: 1000
+    save_steps: 1000
+    eval_steps: 1000
+    output_dir: "models_weights/pretrained/"
+  
+  # 在线微调配置
+  online_finetune:
+    batch_size: 8
+    learning_rate: 1e-6  # 极低学习率
+    mcts_epochs: 50      # MCTS轮数
+    eval_steps: 10       # 每多少轮评估一次
+    save_steps: 10       # 每多少轮保存一次
+    output_dir: "models_weights/finetuned/"
+
+# 优化器配置
+optimizer:
+  type: "adamw"
+  beta1: 0.9
+  beta2: 0.999
+  epsilon: 1e-8
+
+# 学习率调度器配置
+scheduler:
+  type: "cosine_with_warmup"
+  min_lr_ratio: 0.01
+
+# 日志和可视化配置
+logging:
+  level: "INFO"
+  tensorboard_dir: "results/logs/tensorboard/"
+  wandb:
+    enabled: true
+    project: "symbolic-regression-mcts"
+    entity: "iflow-cli"
+  save_rewards: true
+  save_expressions: true
+  plot_frequency: 10
+
+# 输出配置
+output:
+  results_dir: "results/"
+  plots_dir: "results/plots/"
+  metrics_dir: "results/metrics/"
+  logs_dir: "results/logs/"
+  checkpoint_dir: "models_weights/"
+
+# 随机种子
+random_seed: 42
+
+# 设备配置
+device: "cuda"  # cuda 或 cpu
+num_workers: 4

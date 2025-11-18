@@ -1,4 +1,4 @@
-.venv
-SR4MDL
-result
+data
+models_weights
 nd2py_package
+results

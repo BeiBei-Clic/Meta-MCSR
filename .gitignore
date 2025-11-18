@@ -2,6 +2,7 @@ data
 models_weights
 nd2py_package
 results
+files
 
 # Python
 __pycache__/

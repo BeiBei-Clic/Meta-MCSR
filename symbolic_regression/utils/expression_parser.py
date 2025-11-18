@@ -284,23 +284,123 @@ class ExpressionParser:
         # 预处理表达式
         processed_expr = self._preprocess(expression)
         
+        # 准备安全的数学函数
+        def safe_sin(x):
+            return np.sin(np.asarray(x))
+        
+        def safe_cos(x):
+            return np.cos(np.asarray(x))
+        
+        def safe_tan(x):
+            return np.tan(np.asarray(x))
+        
+        def safe_exp(x):
+            # 限制指数函数的上限以避免溢出
+            if np.isscalar(x):
+                return np.exp(min(x, 500))
+            else:
+                x = np.asarray(x)
+                x = np.clip(x, None, 500)  # 限制最大值为500
+                return np.exp(x)
+        
+        def safe_log(x):
+            # 对数函数只允许正值，并设置最小值避免log(0)
+            if np.isscalar(x):
+                if x <= 0:
+                    x = 1e-10
+                return np.log(max(x, 1e-10))
+            else:
+                x = np.asarray(x)
+                x = np.maximum(x, 1e-10)  # 最小值设为1e-10
+                return np.log(x)
+        
+        def safe_sqrt(x):
+            # 平方根只允许非负数
+            if np.isscalar(x):
+                return np.sqrt(max(x, 0))
+            else:
+                x = np.asarray(x)
+                return np.sqrt(np.maximum(x, 0))
+        
+        def safe_cbrt(x):
+            # 立方根允许负数
+            if np.isscalar(x):
+                return np.sign(x) * np.power(abs(x), 1/3)
+            else:
+                x = np.asarray(x)
+                return np.sign(x) * np.power(np.abs(x), 1/3)
+        
+        def safe_pow(base, exponent):
+            # 安全的幂运算，避免0^0和负数的非整数次幂
+            base = np.asarray(base)
+            exponent = np.asarray(exponent)
+            
+            # 避免0^0
+            if np.isscalar(base) and np.isscalar(exponent):
+                if base == 0 and exponent == 0:
+                    return 1.0  # 定义0^0 = 1
+                if base < 0 and exponent != np.round(exponent):
+                    # 负数的非整数次幂，使用复数，但我们返回实数部分
+                    return abs(base) ** exponent  # 使用绝对值避免复数
+            else:
+                # 向量情况
+                result = np.power(np.maximum(base, 1e-10), exponent)  # 避免负底数
+                # 处理0^0情况
+                zero_mask = (base == 0) & (exponent == 0)
+                result[zero_mask] = 1.0
+                return result
+            
+            return np.power(base, exponent)
+        
+        def safe_divide(a, b):
+            # 安全的除法，避免除零
+            if np.isscalar(a) and np.isscalar(b):
+                if abs(b) < 1e-10:
+                    # 如果分母接近0，返回一个小的值或根据情况调整
+                    if abs(a) < 1e-10:
+                        return 0.0
+                    else:
+                        return a * 1e10  # 避免除零，设为大数
+            else:
+                a = np.asarray(a)
+                b = np.asarray(b)
+                b = np.where(np.abs(b) < 1e-10, 1e-10, b)  # 替换接近0的分母
+                return a / b
+            
+            return a / b
+        
         # 准备执行环境
         env = variables.copy()
         env.update({
-            # 数学函数
-            'sin': np.sin, 'cos': np.cos, 'tan': np.tan,
-            'exp': np.exp, 'log': np.log, 'ln': np.log,
-            'sqrt': np.sqrt, 'abs': np.abs,
+            # 安全的数学函数
+            'sin': safe_sin, 'cos': safe_cos, 'tan': safe_tan,
+            'exp': safe_exp, 'log': safe_log, 'ln': safe_log,
+            'sqrt': safe_sqrt, 'cbrt': safe_cbrt, 'abs': np.abs,
             'pi': np.pi, 'e': np.e,
             # 安全函数
-            'min': min, 'max': max,
-            'round': round, 'abs': abs
+            'min': min, 'max': max, 'round': round, 'abs': abs,
+            'pow': safe_pow
         })
         
         try:
+            # 处理幂运算符号替换
+            processed_expr = processed_expr.replace('^', '**')
+            
             # 安全求值
             result = eval(processed_expr, {"__builtins__": {}}, env)
-            return float(result)
+            
+            # 最终的数值检查
+            if np.isscalar(result):
+                result = float(result)
+                if np.isnan(result) or np.isinf(result):
+                    raise ValueError("计算结果包含 NaN 或无穷值")
+            else:
+                result = np.asarray(result)
+                if np.any(np.isnan(result)) or np.any(np.isinf(result)):
+                    raise ValueError("计算结果包含 NaN 或无穷值")
+                result = result.tolist() if hasattr(result, 'tolist') else float(result)
+            
+            return result
         except Exception as e:
             raise ValueError(f"表达式计算失败: {str(e)}")
     

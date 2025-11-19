@@ -53,10 +53,7 @@ class PySRDataGenerator:
             # 电磁学
             PhysicsFormula("电场强度", "电磁学", "F / q", ["F", "q"], "电场强度定义", 1),
             PhysicsFormula("电势", "电磁学", "k * q / r", ["k", "q", "r"], "点电荷电势", 2),
-            PhysicsFormula("电容", "电磁学", "Q / V", ["Q", "V"], "电容定义", 1),
-            PhysicsFormula("欧姆定律", "电磁学", "I * R", ["I", "R"], "欧姆定律", 1),
-            PhysicsFormula("电感感应", "电磁学", "L * di / dt", ["L", "di", "dt"], "法拉第电磁感应定律", 3),
-            PhysicsFormula("洛伦兹力", "电磁学", "q * E + q * v", ["q", "E", "v"], "洛伦兹力公式", 4),
+            PhysicsFormula("洛伦兹力", "电磁学", "q * E + q * v * B", ["q", "E", "v", "B"], "洛伦兹力公式", 4),
             
             # 热力学
             PhysicsFormula("内能变化", "热力学", "Q - W", ["Q", "W"], "热力学第一定律", 1),
@@ -65,12 +62,12 @@ class PySRDataGenerator:
             PhysicsFormula("斯特藩-玻尔兹曼定律", "热力学", "sigma * A * T**4", ["sigma", "A", "T"], "黑体辐射", 3),
             
             # 光学
-            PhysicsFormula("折射定律", "光学", "n2 * sin(theta2)", ["n2", "theta2"], "斯涅尔定律", 2),
-            PhysicsFormula("薄透镜公式", "光学", "1/do + 1/di", ["do", "di"], "透镜成像公式", 2),
-            PhysicsFormula("多普勒效应", "光学", "f * (v + v_obs) / (v - v_source)", ["f", "v", "v_obs", "v_source"], "多普勒频移", 4),
+            PhysicsFormula("折射定律", "光学", "n1 * sin(theta1) / n2", ["n1", "theta1", "n2"], "斯涅尔定律", 2),
+            PhysicsFormula("薄透镜公式", "光学", "1 / (1/do + 1/di)", ["do", "di"], "透镜成像公式", 2),
+            PhysicsFormula("多普勒效应", "光学", "f * sqrt((1 + v_obs/c) / (1 - v_source/c))", ["f", "v_obs", "v_source", "c"], "多普勒频移", 4),
             
             # 量子
-            PhysicsFormula("薛定谔方程", "量子", "m * v**2 / 2", ["m", "v"], "简化薛定谔方程", 5),
+            PhysicsFormula("薛定谔方程", "量子", "-hbar**2/(2*m) * d2psi_dx2 + V * psi", ["hbar", "m", "d2psi_dx2", "V", "psi"], "简化薛定谔方程", 5),
             
             # 统计
             PhysicsFormula("玻尔兹曼分布", "统计", "exp(-E/(k*T)) / Z", ["E", "k", "T", "Z"], "玻尔兹曼因子", 3),
@@ -114,7 +111,7 @@ class PySRDataGenerator:
                 'cos': np.cos,
                 'exp': lambda x: np.exp(np.clip(x, -500, 500)),
                 'log': lambda x: np.log(np.maximum(x, 1e-10)),
-                'sqrt': lambda x: np.sqrt(np.maximum(x, 0)),
+                'sqrt': lambda x: np.sqrt(np.maximum(x, 1e-10)),
                 'pi': np.pi,
                 'e': np.e,
             }
@@ -158,11 +155,14 @@ class PySRDataGenerator:
     def _generate_physical_data_from_formula(self, formula: PhysicsFormula) -> tuple:
         """从物理公式生成数据"""
         try:
-            # 生成输入数据
-            X = np.random.uniform(-10, 10, (self.samples_per_expression, len(formula.variables)))
+            # 生成符合物理约束的输入数据
+            X = self._generate_physical_bounds_data(formula)
             
             # 计算输出
             y = self._evaluate_expression(formula.expression, X, formula.variables)
+            
+            # 处理无穷大和NaN值
+            y = np.nan_to_num(y, nan=0.0, posinf=100.0, neginf=-100.0)
             
             # 添加噪声
             noise = np.random.normal(0, 0.01, y.shape)
@@ -176,6 +176,60 @@ class PySRDataGenerator:
             X = np.random.uniform(-2, 2, (self.samples_per_expression, len(formula.variables)))
             y = X[:, 0] + np.random.normal(0, 0.01, self.samples_per_expression)
             return X, y, f"{formula.variables[0]} + noise"
+    
+    def _generate_physical_bounds_data(self, formula: PhysicsFormula) -> np.ndarray:
+        """生成符合物理约束的数据"""
+        X = np.zeros((self.samples_per_expression, len(formula.variables)))
+        
+        for i, var_name in enumerate(formula.variables):
+            # 根据变量名和公式类型设置合理的边界
+            if self._is_kinematics_variable(var_name):
+                # 运动学变量可以是负值
+                X[:, i] = np.random.uniform(-10, 10, self.samples_per_expression)
+            elif self._is_positive_physical_constant(var_name, formula):
+                # 物理常数和正参数
+                if var_name in ['T', 'k', 'hbar', 'm', 'm1', 'm2', 'sigma', 'c']:
+                    X[:, i] = np.random.uniform(0.1, 10, self.samples_per_expression)
+                else:
+                    X[:, i] = np.random.uniform(0.1, 5, self.samples_per_expression)
+            elif self._is_dimensionless_variable(var_name, formula):
+                # 无量纲变量（如角度、比率）
+                X[:, i] = np.random.uniform(-1, 1, self.samples_per_expression)
+            else:
+                # 默认范围
+                X[:, i] = np.random.uniform(-5, 5, self.samples_per_expression)
+        
+        return X
+    
+    def _is_kinematics_variable(self, var_name: str) -> bool:
+        """判断是否为运动学变量"""
+        kinematics_vars = ['t', 'x', 'v', 'v0', 'v_obs', 'v_source', 'a', 'h0']
+        return var_name in kinematics_vars
+    
+    def _is_positive_physical_constant(self, var_name: str, formula: PhysicsFormula) -> bool:
+        """判断是否为正物理常数"""
+        positive_constants = ['k', 'hbar', 'm', 'm1', 'm2', 'T', 'sigma', 'c']
+        
+        # 检查是否为正常数
+        if var_name in positive_constants:
+            return True
+        
+        # 根据公式类型判断
+        if formula.domain == "电磁学":
+            return var_name in ['k', 'q']
+        elif formula.domain == "热力学":
+            return var_name in ['k', 'T', 'sigma']
+        elif formula.domain == "量子":
+            return var_name in ['hbar', 'm']
+        elif formula.domain == "相对论":
+            return var_name == 'c'
+        
+        return False
+    
+    def _is_dimensionless_variable(self, var_name: str, formula: PhysicsFormula) -> bool:
+        """判断是否是无量纲变量"""
+        dimensionless_vars = ['theta1', 'n1', 'n2', 'Z']
+        return var_name in dimensionless_vars
     
     def generate_pysr_datasets(self, output_dir: str):
         """生成PySR格式的数据集"""

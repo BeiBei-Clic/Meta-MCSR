@@ -12,6 +12,7 @@ from typing import Dict, List, Optional, Tuple, Any
 import os
 import json
 import logging
+import gc
 from tqdm import tqdm
 from collections import deque
 
@@ -47,6 +48,10 @@ class FinetuneLoop:
         self.reward_calculator = RewardCalculator(
             reward_weights=config.get('reward_weights', None)
         )
+        
+        # 内存管理
+        self.memory_management_enabled = config.get('memory_management', True)
+        self.gradient_checkpointing = config.get('gradient_checkpointing', False)
         
         # MCTS引擎
         self.mcts_engine = self._create_mcts_engine()
@@ -148,6 +153,20 @@ class FinetuneLoop:
         
         self.logger.info("计算目标嵌入完成")
         
+        # 检查并记录初始内存状态
+        if self.memory_management_enabled and torch.cuda.is_available():
+            memory_allocated = torch.cuda.memory_allocated() / 1024**3
+            total_memory = torch.cuda.get_device_properties(0).total_memory / 1024**3
+            free_memory = total_memory - memory_allocated
+            self.logger.info(f"初始GPU内存状态: {memory_allocated:.2f} GB / {total_memory:.2f} GB (可用: {free_memory:.2f} GB)")
+            
+            # 如果可用内存少于1GB，发出警告
+            if free_memory < 1.0:
+                self.logger.warning(f"可用GPU内存较少 ({free_memory:.2f} GB)，可能需要进一步优化")
+                # 立即清理一次
+                torch.cuda.empty_cache()
+                gc.collect()
+                
         # 主循环训练
         for epoch in range(self.config.get('mcts_epochs', 50)):
             self.epoch = epoch
@@ -161,7 +180,7 @@ class FinetuneLoop:
             
             # 阶段二：网络微调（基于真实解）
             finetune_loss = self._finetune_phase(
-                X, y, true_expression, target_data_embedding.cpu().numpy()  # 确保是numpy格式
+                X, y, true_expression, target_data_embedding.detach().cpu().numpy()  # 确保是numpy格式
             )
             
             # 多样性评估：检查当前表达式与历史最佳表达式的差异
@@ -199,6 +218,23 @@ class FinetuneLoop:
                 f"Finetune Loss = {finetune_loss:.4f}, "
                 f"Best Expression = {best_expr}"
             )
+            
+            # 内存管理
+            if self.memory_management_enabled and torch.cuda.is_available():
+                # 清理CUDA缓存
+                torch.cuda.empty_cache()
+                # 垃圾回收
+                gc.collect()
+                
+                # 记录内存使用
+                if (epoch + 1) % 5 == 0 or epoch == 0:
+                    memory_allocated = torch.cuda.memory_allocated() / 1024**3
+                    memory_reserved = torch.cuda.memory_reserved() / 1024**3
+                    total_memory = torch.cuda.get_device_properties(0).total_memory / 1024**3
+                    self.logger.info(
+                        f"GPU内存使用: {memory_allocated:.2f}GB / {total_memory:.2f}GB "
+                        f"(保留: {memory_reserved:.2f}GB, 空闲: {total_memory - memory_allocated:.2f}GB)"
+                    )
             
             # 定期保存
             if (epoch + 1) % self.config.get('save_steps', 10) == 0:
@@ -267,57 +303,61 @@ class FinetuneLoop:
         true_expression: str,
         target_data_embedding: np.ndarray
     ) -> float:
-        """阶段二：网络微调（添加噪声和正则化避免过拟合）"""
+        """阶段二：网络微调（内存优化版本）"""
 
         self.expression_encoder.train()
         self.data_encoder.train()
 
         self.optimizer.zero_grad()
 
-        # 计算真实解和数据集的嵌入
-        true_expr_embedding = self.expression_encoder.encode(true_expression)
-        data_embedding = target_data_embedding
+        # 使用with torch.no_grad()来避免额外的梯度计算
+        with torch.no_grad():
+            # 计算真实解和数据集的嵌入
+            true_expr_embedding = self.expression_encoder.encode(true_expression)
+            data_embedding = target_data_embedding
 
-        # 确保数据在正确的设备上，并且是张量格式
-        if isinstance(true_expr_embedding, np.ndarray):
-            true_expr_embedding = torch.FloatTensor(true_expr_embedding)
+            # 确保数据在正确的设备上，并且是张量格式
+            if isinstance(true_expr_embedding, np.ndarray):
+                true_expr_embedding = torch.FloatTensor(true_expr_embedding)
 
-        if isinstance(data_embedding, np.ndarray):
-            data_embedding = torch.FloatTensor(data_embedding)
+            if isinstance(data_embedding, np.ndarray):
+                data_embedding = torch.FloatTensor(data_embedding)
 
-        # 将张量移动到设备
-        expr_tensor = true_expr_embedding.to(self.device)
-        data_tensor = data_embedding.to(self.device)
+            # 将张量移动到设备
+            expr_tensor = true_expr_embedding.to(self.device)
+            data_tensor = data_embedding.to(self.device)
 
-        # 计算余弦相似度
-        cosine_similarity = F.cosine_similarity(expr_tensor.unsqueeze(0), data_tensor.unsqueeze(0))
+            # 计算余弦相似度
+            cosine_similarity = F.cosine_similarity(expr_tensor.unsqueeze(0), data_tensor.unsqueeze(0))
 
-        # 添加噪声来避免过拟合
-        noise_factor = 0.1 * (1.0 - self.epoch / self.config['mcts_epochs'])  # 随训练进度减少噪声
-        expr_noise = torch.randn_like(expr_tensor) * noise_factor
-        data_noise = torch.randn_like(data_tensor) * noise_factor
+            # 减少噪声生成的内存使用
+            noise_factor = 0.1 * (1.0 - self.epoch / self.config['mcts_epochs'])  # 随训练进度减少噪声
+            
+            # 原地操作减少内存分配
+            expr_tensor.add_(torch.randn_like(expr_tensor) * noise_factor)
+            data_tensor.add_(torch.randn_like(data_tensor) * noise_factor)
 
-        noisy_expr = expr_tensor + expr_noise
-        noisy_data = data_tensor + data_noise
+            # 重新计算带噪声的余弦相似度
+            noisy_cosine = F.cosine_similarity(expr_tensor.unsqueeze(0), data_tensor.unsqueeze(0))
 
-        noisy_cosine = F.cosine_similarity(noisy_expr.unsqueeze(0), noisy_data.unsqueeze(0))
+        # 分离的损失计算
+        finetune_loss = 1 - noisy_cosine.detach()
 
-        # 对比学习损失
-        finetune_loss = 1 - noisy_cosine
+        # 内存优化的正则化计算
+        if self.epoch % 5 == 0:  # 每5个epoch计算一次正则化损失
+            # 添加L2正则化
+            l2_reg = 0.01
+            reg_loss = 0.0
+            for param in list(self.expression_encoder.parameters()) + list(self.data_encoder.parameters()):
+                reg_loss += torch.norm(param, p=2)
+            finetune_loss += l2_reg * reg_loss
 
-        # 添加L2正则化
-        l2_reg = 0.01
-        reg_loss = 0.0
-        for param in list(self.expression_encoder.parameters()) + list(self.data_encoder.parameters()):
-            reg_loss += torch.norm(param, p=2)
-        finetune_loss += l2_reg * reg_loss
-
-        # 添加熵正则化鼓励多样性
-        entropy_reg = -0.001 * torch.mean(cosine_similarity**2)
-        finetune_loss += entropy_reg
+            # 添加熵正则化鼓励多样性
+            entropy_reg = -0.001 * torch.mean(cosine_similarity**2)
+            finetune_loss += entropy_reg
 
         # 反向传播
-        finetune_loss.backward()
+        finetune_loss.backward(retain_graph=False)  # 避免保留计算图
 
         # 更严格的梯度裁剪
         torch.nn.utils.clip_grad_norm_(
@@ -328,6 +368,14 @@ class FinetuneLoop:
         # 更新权重
         self.optimizer.step()
 
+        # 立即清理临时变量
+        if self.memory_management_enabled and torch.cuda.is_available():
+            del expr_tensor, data_tensor, cosine_similarity, noisy_cosine
+            if 'reg_loss' in locals():
+                del reg_loss
+            if 'entropy_reg' in locals():
+                del entropy_reg
+        
         return finetune_loss.item()
     
     def _evaluate_performance(
@@ -557,3 +605,29 @@ class FinetuneLoop:
         self.reward_calculator.reset_history()
         
         self.logger.info("训练状态已重置")
+    
+    def check_memory_status(self) -> Dict[str, float]:
+        """检查GPU内存状态"""
+        if not torch.cuda.is_available():
+            return {'cuda_available': False}
+        
+        memory_allocated = torch.cuda.memory_allocated() / 1024**3
+        memory_reserved = torch.cuda.memory_reserved() / 1024**3
+        total_memory = torch.cuda.get_device_properties(0).total_memory / 1024**3
+        free_memory = total_memory - memory_allocated
+        
+        return {
+            'cuda_available': True,
+            'memory_allocated_gb': memory_allocated,
+            'memory_reserved_gb': memory_reserved,
+            'total_memory_gb': total_memory,
+            'free_memory_gb': free_memory,
+            'memory_usage_percent': (memory_allocated / total_memory) * 100
+        }
+    
+    def clear_memory(self):
+        """清理GPU内存"""
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            gc.collect()
+            self.logger.info("GPU内存已清理")

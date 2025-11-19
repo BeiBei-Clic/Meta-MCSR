@@ -15,6 +15,9 @@ import argparse
 from typing import Dict, Any, Optional
 from pathlib import Path
 
+# 设置CUDA内存管理
+os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
+
 # 添加项目路径
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
@@ -180,7 +183,10 @@ def get_default_config() -> Dict[str, Any]:
                 'eval_steps': 5,
                 'save_steps': 5,
                 'output_dir': 'models_weights/finetuned/',
-                'buffer_size': 5000
+                'buffer_size': 5000,
+                # 内存管理选项
+                'memory_management': True,
+                'gradient_checkpointing': False
             }
         },
         'device': 'cuda' if torch.cuda.is_available() else 'cpu',

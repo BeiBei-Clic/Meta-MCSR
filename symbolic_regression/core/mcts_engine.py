@@ -171,7 +171,7 @@ class EnhancedMCTSEngine:
                 self.best_r2 = best_node.r2
                 self.best_expr = best_node.phi
                 
-            if i % 100 == 0:
+            if i % 500 == 0:
                 print(f"Iteration {i}: Best R2 = {self.best_r2:.4f}, Best Expr = {self.best_expr}")
                 
         return self.best_expr

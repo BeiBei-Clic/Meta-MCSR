@@ -388,6 +388,8 @@ class PretrainPipeline:
         
         total_loss = 0.0
         total_samples = 0
+        total_grad_norm = 0.0
+        num_batches = 0
         
         for batch_idx, (expressions, X_list, y_list) in enumerate(dataloader):
             batch_size = len(expressions)
@@ -399,8 +401,8 @@ class PretrainPipeline:
             self.optimizer.zero_grad()
             batch_loss.backward()
             
-            # 梯度裁剪
-            torch.nn.utils.clip_grad_norm_(
+            # 计算梯度范数
+            grad_norm = torch.nn.utils.clip_grad_norm_(
                 list(self.expression_encoder.parameters()) + list(self.data_encoder.parameters()),
                 max_norm=1.0
             )
@@ -411,11 +413,15 @@ class PretrainPipeline:
             # 统计
             total_loss += batch_loss.item() * batch_size
             total_samples += batch_size
+            total_grad_norm += grad_norm.item() if grad_norm is not None else 0.0
+            num_batches += 1
             
             self.global_step += 1
         
         avg_loss = total_loss / total_samples
-        return {'loss': avg_loss}
+        avg_grad_norm = total_grad_norm / num_batches if num_batches > 0 else 0.0
+        
+        return {'loss': avg_loss, 'grad_norm': avg_grad_norm}
     
     def _compute_contrastive_loss(
         self,
@@ -544,27 +550,19 @@ class PretrainPipeline:
             # 更新学习率调度器
             self.scheduler.step(val_metrics['loss'])
 
-            # 使用tqdm的set_postfix显示训练信息
-            current_lr = self.scheduler.get_last_lr()[0]
-            postfix_info = {
-                'Train Loss': f"{train_metrics['loss']:.4f}",
-                'Val Loss': f"{val_metrics['loss']:.4f}",
-                'LR': f"{current_lr:.2e}"
-            }
-
-            # 保存最佳模型
-            best_model_saved = False
+            # 保存最佳模型（静默保存，不在进度条显示）
             if val_metrics['loss'] < self.best_loss:
                 self.best_loss = val_metrics['loss']
                 self.save_pretrained()
-                best_model_saved = True
                 self.logger.info(f"新的最佳模型已保存，验证损失: {self.best_loss:.4f}")
 
-            # 如果保存了最佳模型，在postfix中显示
-            if best_model_saved:
-                postfix_info['Best Model'] = "✓"
-            else:
-                postfix_info['Best Model'] = ""
+            # 使用tqdm的set_postfix显示训练信息（去掉学习率和最佳模型，增加梯度范数）
+            grad_norm = train_metrics.get('grad_norm', 0.0)
+            postfix_info = {
+                'Train Loss': f"{train_metrics['loss']:.4f}",
+                'Val Loss': f"{val_metrics['loss']:.4f}",
+                'Grad Norm': f"{grad_norm:.4f}"
+            }
 
             epoch_pbar.set_postfix(postfix_info)
 
@@ -572,7 +570,7 @@ class PretrainPipeline:
             self.logger.info(
                 f"Epoch {epoch}: Train Loss = {train_metrics['loss']:.4f}, "
                 f"Val Loss = {val_metrics['loss']:.4f}, "
-                f"LR = {current_lr:.2e}"
+                f"Grad Norm = {grad_norm:.4f}"
             )
 
         epoch_pbar.close()

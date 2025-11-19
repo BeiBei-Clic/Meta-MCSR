@@ -140,7 +140,7 @@ def load_pretrain_data(pretrain_data_path: str = "data/pysr_datasets") -> Option
             
             for file_name in txt_files:
                 file_path = os.path.join(pretrain_data_path, file_name)
-                print(f"处理文件: {file_name}")
+                # print(f"处理文件: {file_name}")
                 
                 with open(file_path, 'r', encoding='utf-8') as f:
                     lines = f.readlines()
@@ -153,7 +153,7 @@ def load_pretrain_data(pretrain_data_path: str = "data/pysr_datasets") -> Option
                 first_line = lines[0].strip()
                 if first_line.startswith('表达式: '):
                     current_expression = first_line.replace('表达式: ', '').strip()
-                    print(f"  找到表达式: {current_expression}")
+                    # print(f"  找到表达式: {current_expression}")
                 else:
                     print(f"  文件 {file_name} 第一行格式错误: {first_line[:50]}...")
                     continue
@@ -199,7 +199,7 @@ def load_pretrain_data(pretrain_data_path: str = "data/pysr_datasets") -> Option
                         'samples': samples,
                         'variables': variables  # 动态变量列表
                     })
-                    print(f"  加载样本数量: {len(samples)}, 变量维度: {len(variables)}")
+                    # print(f"  加载样本数量: {len(samples)}, 变量维度: {len(variables)}")
                     count += 1
                 else:
                     print(f"  文件 {file_name} 无有效数据")
@@ -255,7 +255,7 @@ def convert_pysr_data_to_pretrain_format(pysr_data: List[Dict[str, Any]]) -> Tup
             expressions.append(expression)
             datasets.append((X, y))
             
-            print(f"  转换表达式: {expression[:50]}..., 维度: {X.shape[1]}")
+            # print(f"  转换表达式: {expression[:50]}..., 维度: {X.shape[1]}")
     
     return expressions, datasets
 

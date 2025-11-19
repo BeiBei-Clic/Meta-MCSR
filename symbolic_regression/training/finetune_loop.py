@@ -70,7 +70,9 @@ class FinetuneLoop:
         self.performance_history = {
             'r2_scores': [],
             'best_expressions': [],
-            'finetune_losses': []
+            'finetune_losses': [],
+            'diversity_scores': [],
+            'composite_scores': []
         }
     
     def _create_optimizer(self):
@@ -159,28 +161,41 @@ class FinetuneLoop:
             
             # 阶段二：网络微调（基于真实解）
             finetune_loss = self._finetune_phase(
-                X, y, true_expression, target_data_embedding
+                X, y, true_expression, target_data_embedding.cpu().numpy()  # 确保是numpy格式
             )
+            
+            # 多样性评估：检查当前表达式与历史最佳表达式的差异
+            diversity_score = self._evaluate_diversity(best_expr)
             
             # 评估性能
             performance = self._evaluate_performance(X, y, best_expr)
+            
+            # 综合评分：R2 + 多样性奖励 - 复杂度惩罚
+            complexity_penalty = len(str(best_expr)) * 0.001
+            composite_score = performance['r2'] + 0.1 * diversity_score - complexity_penalty
             
             # 记录性能
             self.performance_history['r2_scores'].append(performance['r2'])
             self.performance_history['best_expressions'].append(str(best_expr))
             self.performance_history['finetune_losses'].append(finetune_loss)
+            self.performance_history['diversity_scores'].append(diversity_score)
+            self.performance_history['composite_scores'].append(composite_score)
             
-            # 更新最佳性能
-            if performance['r2'] > self.best_performance['r2']:
+            # 更新最佳性能（基于综合评分）
+            if composite_score > getattr(self.best_performance, 'composite_score', -np.inf):
                 self.best_performance.update({
                     'r2': performance['r2'],
                     'expression': str(best_expr),
-                    'epoch': epoch
+                    'epoch': epoch,
+                    'diversity_score': diversity_score,
+                    'composite_score': composite_score
                 })
             
             # 记录日志
             self.logger.info(
                 f"Epoch {epoch + 1}: R2 = {performance['r2']:.4f}, "
+                f"Diversity = {diversity_score:.4f}, "
+                f"Composite = {composite_score:.4f}, "
                 f"Finetune Loss = {finetune_loss:.4f}, "
                 f"Best Expression = {best_expr}"
             )
@@ -189,10 +204,24 @@ class FinetuneLoop:
             if (epoch + 1) % self.config.get('save_steps', 10) == 0:
                 self.save_checkpoint()
             
-            # 提前停止条件
-            if performance['r2'] > 0.95:  # 如果R2超过95%，可以提前停止
-                self.logger.info(f"达到优秀性能 (R2={performance['r2']:.4f})，提前停止")
-                break
+            # 更合理的提前停止条件
+            if len(self.performance_history['r2_scores']) >= 10:
+                recent_r2 = self.performance_history['r2_scores'][-10:]
+                r2_std = np.std(recent_r2)
+                r2_trend = np.mean(recent_r2[-5:]) - np.mean(recent_r2[:5])
+                
+                # 如果R2变化很小且标准差很小，可能已经收敛到局部最优
+                if r2_std < 0.001 and abs(r2_trend) < 0.001:
+                    self.logger.info(f"R2收敛过早 (标准差={r2_std:.6f})，可能存在过拟合，提前停止")
+                    break
+            
+            # 如果多样性过低，也可能存在过拟合
+            if hasattr(self, 'performance_history') and len(self.performance_history['diversity_scores']) >= 5:
+                recent_diversity = self.performance_history['diversity_scores'][-5:]
+                avg_diversity = np.mean(recent_diversity)
+                if avg_diversity < 0.01:
+                    self.logger.info(f"多样性过低 ({avg_diversity:.4f})，可能存在过拟合，提前停止")
+                    break
         
         self.logger.info("在线微调循环完成！")
         return {
@@ -238,42 +267,67 @@ class FinetuneLoop:
         true_expression: str,
         target_data_embedding: np.ndarray
     ) -> float:
-        """阶段二：网络微调（基于真实解的精准学习）"""
-        
+        """阶段二：网络微调（添加噪声和正则化避免过拟合）"""
+
         self.expression_encoder.train()
         self.data_encoder.train()
-        
-        # 使用唯一的、完美的正样本对 (E_true, D_task)
+
         self.optimizer.zero_grad()
-        
+
         # 计算真实解和数据集的嵌入
         true_expr_embedding = self.expression_encoder.encode(true_expression)
         data_embedding = target_data_embedding
-        
-        # 转换为张量
-        expr_tensor = torch.FloatTensor(true_expr_embedding).to(self.device)
-        data_tensor = torch.FloatTensor(data_embedding).to(self.device)
-        
-        # 计算协同嵌入损失
-        # 损失函数目标：最大化真实解对的余弦相似度
+
+        # 确保数据在正确的设备上，并且是张量格式
+        if isinstance(true_expr_embedding, np.ndarray):
+            true_expr_embedding = torch.FloatTensor(true_expr_embedding)
+
+        if isinstance(data_embedding, np.ndarray):
+            data_embedding = torch.FloatTensor(data_embedding)
+
+        # 将张量移动到设备
+        expr_tensor = true_expr_embedding.to(self.device)
+        data_tensor = data_embedding.to(self.device)
+
+        # 计算余弦相似度
         cosine_similarity = F.cosine_similarity(expr_tensor.unsqueeze(0), data_tensor.unsqueeze(0))
-        
-        # 对比学习损失：1 - cosine_similarity
-        # 这样当相似度为1时，损失为0；当相似度为-1时，损失为2
-        finetune_loss = 1 - cosine_similarity
-        
+
+        # 添加噪声来避免过拟合
+        noise_factor = 0.1 * (1.0 - self.epoch / self.config['mcts_epochs'])  # 随训练进度减少噪声
+        expr_noise = torch.randn_like(expr_tensor) * noise_factor
+        data_noise = torch.randn_like(data_tensor) * noise_factor
+
+        noisy_expr = expr_tensor + expr_noise
+        noisy_data = data_tensor + data_noise
+
+        noisy_cosine = F.cosine_similarity(noisy_expr.unsqueeze(0), noisy_data.unsqueeze(0))
+
+        # 对比学习损失
+        finetune_loss = 1 - noisy_cosine
+
+        # 添加L2正则化
+        l2_reg = 0.01
+        reg_loss = 0.0
+        for param in list(self.expression_encoder.parameters()) + list(self.data_encoder.parameters()):
+            reg_loss += torch.norm(param, p=2)
+        finetune_loss += l2_reg * reg_loss
+
+        # 添加熵正则化鼓励多样性
+        entropy_reg = -0.001 * torch.mean(cosine_similarity**2)
+        finetune_loss += entropy_reg
+
         # 反向传播
         finetune_loss.backward()
-        
-        # 梯度裁剪
+
+        # 更严格的梯度裁剪
         torch.nn.utils.clip_grad_norm_(
             list(self.expression_encoder.parameters()) + list(self.data_encoder.parameters()),
-            max_norm=1.0
+            max_norm=0.5
         )
-        
+
         # 更新权重
         self.optimizer.step()
-        
+
         return finetune_loss.item()
     
     def _evaluate_performance(
@@ -305,6 +359,33 @@ class FinetuneLoop:
                 'rmse': np.inf,
                 'expression': expression
             }
+    
+    def _evaluate_diversity(self, expression: Any) -> float:
+        """评估当前表达式与历史最佳表达式之间的多样性"""
+        try:
+            current_expr_str = str(expression)
+            
+            # 与历史表达式比较
+            diversity_scores = []
+            for prev_expr in self.performance_history['best_expressions']:
+                if prev_expr and prev_expr != current_expr_str:
+                    # 简单的字符串差异度量
+                    current_len = len(current_expr_str)
+                    prev_len = len(prev_expr)
+                    len_diff = abs(current_len - prev_len)
+                    
+                    # 字符级别的差异
+                    common_chars = set(current_expr_str) & set(prev_expr)
+                    char_diversity = (len(set(current_expr_str) | set(prev_expr)) - len(common_chars)) / max(current_len, prev_len)
+                    
+                    diversity_scores.append(char_diversity)
+            
+            # 返回平均多样性分数
+            return np.mean(diversity_scores) if diversity_scores else 1.0
+            
+        except Exception as e:
+            self.logger.warning(f"多样性评估时出错: {e}")
+            return 0.0
     
     def predict(self, X: np.ndarray) -> np.ndarray:
         """使用训练好的模型进行预测"""
@@ -468,7 +549,9 @@ class FinetuneLoop:
         self.performance_history = {
             'r2_scores': [],
             'best_expressions': [],
-            'finetune_losses': []
+            'finetune_losses': [],
+            'diversity_scores': [],
+            'composite_scores': []
         }
         self.experience_buffer.clear()
         self.reward_calculator.reset_history()

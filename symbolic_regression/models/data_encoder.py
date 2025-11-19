@@ -136,8 +136,18 @@ class DataEncoder(nn.Module):
 
         # 确保数据在正确的设备上
         device = next(self.parameters()).device
-        X = X.to(device)
-        y = y.to(device)
+        
+        # 如果输入是numpy数组，转换为PyTorch张量
+        if isinstance(X, np.ndarray):
+            X = torch.FloatTensor(X).to(device)
+        if isinstance(y, np.ndarray):
+            y = torch.FloatTensor(y).to(device)
+            
+        # 确保数据类型正确
+        if not isinstance(X, torch.Tensor):
+            X = X.to(device)
+        if not isinstance(y, torch.Tensor):
+            y = y.to(device)
 
         # 组合数据和目标
         # 我们的目标是创建 (n_features + 1, n_samples) 的张量，其中最后一维是目标值
@@ -306,8 +316,18 @@ class DeepSetDataEncoder(nn.Module):
 
         # 确保数据在正确的设备上
         device = next(self.parameters()).device
-        X = X.to(device)
-        y = y.to(device)
+        
+        # 如果输入是numpy数组，转换为PyTorch张量
+        if isinstance(X, np.ndarray):
+            X = torch.FloatTensor(X).to(device)
+        if isinstance(y, np.ndarray):
+            y = torch.FloatTensor(y).to(device)
+            
+        # 确保数据类型正确
+        if not isinstance(X, torch.Tensor):
+            X = X.to(device)
+        if not isinstance(y, torch.Tensor):
+            y = y.to(device)
 
         # 组合数据和目标
         # 我们的目标是创建 (n_features + 1, n_samples) 的张量，其中最后一维是目标值

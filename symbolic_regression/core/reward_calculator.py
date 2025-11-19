@@ -109,51 +109,63 @@ class RewardCalculator:
         return rewards
     
     def _calculate_data_alignment_reward(
-        self, 
-        expr_embedding: np.ndarray, 
+        self,
+        expr_embedding: np.ndarray,
         data_embedding: np.ndarray
     ) -> float:
         """计算数据对齐奖励"""
         try:
+            # 确保输入是张量格式并移动到CPU
+            if isinstance(expr_embedding, torch.Tensor):
+                expr_embedding = expr_embedding.cpu().numpy()
+            if isinstance(data_embedding, torch.Tensor):
+                data_embedding = data_embedding.cpu().numpy()
+
             # 计算余弦相似度
             expr_tensor = torch.FloatTensor(expr_embedding).unsqueeze(0)
             data_tensor = torch.FloatTensor(data_embedding).unsqueeze(0)
-            
+
             # 余弦相似度
             cosine_sim = F.cosine_similarity(expr_tensor, data_tensor).item()
-            
+
             # 转换为奖励（0-1范围）
             alignment_reward = max(0, (cosine_sim + 1) / 2)
-            
+
             # 应用温度缩放
             alignment_reward = alignment_reward / self.temperature
-            
+
             return alignment_reward
-            
+
         except Exception:
             return 0.0
     
     def _calculate_structure_alignment_reward(
-        self, 
-        expr_embedding: np.ndarray, 
+        self,
+        expr_embedding: np.ndarray,
         target_expr_embedding: Optional[np.ndarray] = None
     ) -> float:
         """计算结构对齐奖励"""
         if target_expr_embedding is None:
             return 0.0
-            
+
         try:
+            # 确保输入是张量格式并移动到CPU
+            if isinstance(expr_embedding, torch.Tensor):
+                expr_embedding = expr_embedding.cpu().numpy()
+            if isinstance(target_expr_embedding, torch.Tensor):
+                target_expr_embedding = target_expr_embedding.cpu().numpy()
+
             # 计算与真实解的余弦相似度
             expr_tensor = torch.FloatTensor(expr_embedding).unsqueeze(0)
             target_tensor = torch.FloatTensor(target_expr_embedding).unsqueeze(0)
-            
+
             cosine_sim = F.cosine_similarity(expr_tensor, target_tensor).item()
-            
+
             # 转换为奖励（0-1范围）
             structure_reward = max(0, (cosine_sim + 1) / 2)
-            
+
             return structure_reward
-            
+
         except Exception:
             return 0.0
     

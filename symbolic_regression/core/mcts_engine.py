@@ -127,7 +127,11 @@ class EnhancedMCTSEngine:
         if variables is not None:
             self.variables = variables
         else:
-            self.variables = [nd.Variable(f'x{i+1}') for i in range(X.shape[1])]
+            # 处理字典格式的X
+            if isinstance(X, dict):
+                self.variables = [nd.Variable(f'x{i+1}') for i in range(len(X))]
+            else:
+                self.variables = [nd.Variable(f'x{i+1}') for i in range(X.shape[1])]
         
         # 计算目标嵌入
         target_expr_embedding = None
@@ -444,8 +448,19 @@ class EnhancedMCTSEngine:
         try:
             # 数据对齐奖励
             if node.embedding is not None and target_data_embedding is not None:
-                expr_embedding = torch.FloatTensor(node.embedding).unsqueeze(0).to(self.device)
-                data_embedding = torch.FloatTensor(target_data_embedding).unsqueeze(0).to(self.device)
+                # 确保嵌入向量在CPU上，然后转换为张量
+                if isinstance(node.embedding, torch.Tensor):
+                    node_embedding_np = node.embedding.detach().cpu().numpy()
+                else:
+                    node_embedding_np = node.embedding
+                    
+                if isinstance(target_data_embedding, torch.Tensor):
+                    target_data_np = target_data_embedding.detach().cpu().numpy()
+                else:
+                    target_data_np = target_data_embedding
+                
+                expr_embedding = torch.FloatTensor(node_embedding_np).unsqueeze(0).to(self.device)
+                data_embedding = torch.FloatTensor(target_data_np).unsqueeze(0).to(self.device)
                 
                 # 计算余弦相似度
                 data_alignment = F.cosine_similarity(expr_embedding, data_embedding).item()
@@ -453,9 +468,20 @@ class EnhancedMCTSEngine:
             
             # 结构对齐奖励（如果提供了真实表达式）
             if target_expr_embedding is not None and node.embedding is not None:
-                target_embedding = torch.FloatTensor(target_expr_embedding).unsqueeze(0).to(self.device)
-                expr_embedding = torch.FloatTensor(node.embedding).unsqueeze(0).to(self.device)
-                
+                # 确保输入是numpy格式，然后转换为张量
+                if isinstance(target_expr_embedding, torch.Tensor):
+                    target_expr_embedding_np = target_expr_embedding.detach().cpu().numpy()
+                else:
+                    target_expr_embedding_np = target_expr_embedding
+                    
+                if isinstance(node.embedding, torch.Tensor):
+                    node_embedding_np = node.embedding.detach().cpu().numpy()
+                else:
+                    node_embedding_np = node.embedding
+
+                target_embedding = torch.FloatTensor(target_expr_embedding_np).unsqueeze(0).to(self.device)
+                expr_embedding = torch.FloatTensor(node_embedding_np).unsqueeze(0).to(self.device)
+
                 structure_alignment = F.cosine_similarity(expr_embedding, target_embedding).item()
                 node.structure_alignment = max(0, structure_alignment)
             else:

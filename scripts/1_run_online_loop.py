@@ -44,6 +44,17 @@ def load_config(config_path: str = "config.yaml") -> Dict[str, Any]:
         import yaml
         with open(config_path, 'r') as f:
             config = yaml.safe_load(f)
+        
+        # 确保数值类型转换，特别是学习率等关键参数
+        if 'training' in config:
+            for training_type in config['training'].values():
+                if 'learning_rate' in training_type:
+                    training_type['learning_rate'] = float(training_type['learning_rate'])
+                if 'weight_decay' in training_type:
+                    training_type['weight_decay'] = float(training_type['weight_decay'])
+                if 'batch_size' in training_type:
+                    training_type['batch_size'] = int(training_type['batch_size'])
+        
         return config
     except ImportError:
         print("请安装pyyaml: pip install pyyaml")
@@ -51,6 +62,86 @@ def load_config(config_path: str = "config.yaml") -> Dict[str, Any]:
     except FileNotFoundError:
         print(f"配置文件 {config_path} 未找到，使用默认配置")
         return get_default_config()
+
+
+def load_pretrain_data(pretrain_data_path: str = "data/pretrain/progress_100000/datasets.txt") -> Optional[Dict[str, Any]]:
+    """加载预训练数据"""
+    if not os.path.exists(pretrain_data_path):
+        print(f"警告：预训练数据文件 {pretrain_data_path} 不存在")
+        return None
+    
+    try:
+        # 加载预训练数据，解析特定格式
+        pretrain_data = []
+        current_expression = None
+        
+        with open(pretrain_data_path, 'r') as f:
+            lines = f.readlines()
+        
+        i = 0
+        max_expressions = 3  # 限制只处理前3个表达式用于测试
+        count = 0
+        
+        while i < len(lines) and count < max_expressions:
+            line = lines[i].strip()
+            
+            # 查找表达式定义
+            if line.startswith('Expression: '):
+                current_expression = line.replace('Expression: ', '').strip()
+                print(f"找到表达式 {count+1}: {current_expression}")
+                
+                # 跳过Sample input data行
+                i += 1
+                if i < len(lines) and lines[i].strip() == 'Sample input data:':
+                    i += 1
+                    
+                    # 收集这个表达式的样本数据
+                    samples = []
+                    while i < len(lines):
+                        sample_line = lines[i].strip()
+                        
+                        # 检查是否到达下一个表达式或文件结尾
+                        if lines[i].strip().startswith('===') or lines[i].strip().startswith('Expression:'):
+                            break
+                            
+                        # 解析样本数据
+                        if sample_line.startswith('Sample ') and 'X=' in sample_line and 'y=' in sample_line:
+                            try:
+                                # 使用正则表达式解析
+                                import re
+                                match = re.search(r'X=\[(.*?)\], y=(.*)', sample_line)
+                                if match:
+                                    x_value = float(match.group(1))
+                                    y_value = float(match.group(2))
+                                    
+                                    samples.append({'X': x_value, 'y': y_value})
+                                else:
+                                    print(f"  正则解析失败: {sample_line[:50]}...")
+                            except (ValueError, IndexError) as e:
+                                # 如果解析失败，跳过这个样本
+                                print(f"  解析样本失败: {sample_line[:50]}... (错误: {e})")
+                                pass
+                        
+                        i += 1
+                    
+                    # 如果有表达式和数据，添加到pretrain_data
+                    if current_expression and samples:
+                        pretrain_data.append({
+                            'expression': current_expression,
+                            'samples': samples
+                        })
+                        print(f"  加载样本数量: {len(samples)}")
+                        count += 1
+            else:
+                i += 1
+        
+        print(f"成功加载 {len(pretrain_data)} 个预训练样本")
+        return pretrain_data
+    except Exception as e:
+        print(f"加载预训练数据失败: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
 
 
 def get_default_config() -> Dict[str, Any]:
@@ -97,58 +188,13 @@ def get_default_config() -> Dict[str, Any]:
     }
 
 
-def create_test_problem() -> Dict[str, Any]:
-    """创建测试问题"""
-    # 定义一些测试表达式
-    test_expressions = [
-        "x1 + 2*x2",
-        "x1 * sin(x2) + x2 * cos(x1)",
-        "x1^2 + x2^2",
-        "exp(-x1) * sin(x2)",
-        "log(x1^2 + x2^2)"
-    ]
-    
-    print("\n请选择测试表达式:")
-    for i, expr in enumerate(test_expressions, 1):
-        print(f"{i}. {expr}")
-    
-    while True:
-        try:
-            choice = int(input("\n请输入选择 (1-5): ")) - 1
-            if 0 <= choice < len(test_expressions):
-                selected_expression = test_expressions[choice]
-                break
-            else:
-                print("无效选择，请输入1-5之间的数字")
-        except ValueError:
-            print("请输入有效的数字")
-    
-    # 生成数据
-    data_loader = DataLoader()
-    dataset = data_loader.generate_synthetic_data(
-        expression=selected_expression,
-        n_samples=1000,
-        n_features=2,
-        variables_range=(-5, 5),
-        noise_level=0.01
-    )
-    
-    return {
-        'true_expression': selected_expression,
-        'X': dataset.X,
-        'y': dataset.y,
-        'variables': dataset.variables
-    }
+
 
 
 def main():
     """主函数"""
     parser = argparse.ArgumentParser(description="在线微调循环训练")
     parser.add_argument('--config', type=str, default='config.yaml', help='配置文件路径')
-    parser.add_argument('--expression', type=str, help='真实表达式（可选）')
-    parser.add_argument('--generate-data', action='store_true', help='生成测试数据')
-    parser.add_argument('--pretrained-path', type=str, help='预训练模型路径')
-    parser.add_argument('--test', action='store_true', help='运行测试模式')
     
     args = parser.parse_args()
     
@@ -188,19 +234,36 @@ def main():
             **config['model']['data_encoder']
         )
         
-        # 加载预训练权重（如果提供）
-        if args.pretrained_path:
-            logger.info(f"加载预训练权重: {args.pretrained_path}")
-            expr_path = os.path.join(args.pretrained_path, 'expression_encoder')
-            data_path = os.path.join(args.pretrained_path, 'data_encoder')
+        # 自动加载预训练权重
+        pretrained_path = 'models_weights/pretrained/'
+        if 'training' in config and 'pretrain' in config['training']:
+            # 从配置文件获取预训练权重路径
+            pretrained_path = config['training']['pretrain'].get('output_dir', pretrained_path)
+        
+        if pretrained_path and os.path.exists(pretrained_path):
+            logger.info(f"自动加载预训练权重: {pretrained_path}")
+            expr_path = os.path.join(pretrained_path, 'expression_encoder')
+            data_path = os.path.join(pretrained_path, 'data_encoder')
             
             if os.path.exists(expr_path):
                 expression_encoder = ExpressionEncoder.from_pretrained(expr_path)
                 expression_encoder.to(device)
+                logger.info("表达式编码器预训练权重加载成功")
             
             if os.path.exists(data_path):
                 data_encoder = DataEncoder.from_pretrained(data_path)
                 data_encoder.to(device)
+                logger.info("数据编码器预训练权重加载成功")
+        else:
+            logger.warning("未找到预训练权重，使用随机初始化")
+        
+        # 自动加载预训练数据
+        pretrain_data = None
+        pretrain_data_path = "data/pretrain/progress_100000/datasets.txt"
+        
+        pretrain_data = load_pretrain_data(pretrain_data_path)
+        if pretrain_data:
+            logger.info(f"从 {pretrain_data_path} 加载了预训练数据")
         
         # 创建在线微调循环
         logger.info("创建在线微调循环...")
@@ -212,33 +275,62 @@ def main():
         )
         
         # 准备数据
-        if args.expression:
-            true_expression = args.expression
-            data_loader = DataLoader()
-            dataset = data_loader.generate_synthetic_data(
-                expression=true_expression,
-                n_samples=1000,
-                n_features=2,
-                variables_range=(-5, 5),
-                noise_level=0.01
-            )
+        if pretrain_data:
+            # 选择不重复的表达式进行测试，避免过拟合
+            selected_sample = None
+            target_expression = None
             
+            # 查找不重复的表达式
+            expression_counts = {}
+            for sample in pretrain_data:
+                expr = sample['expression']
+                expression_counts[expr] = expression_counts.get(expr, 0) + 1
+            
+            # 选择重复次数较少的表达式
+            candidates = [sample for sample in pretrain_data 
+                         if expression_counts[sample['expression']] <= 5]
+            
+            if candidates:
+                # 选择第二个表达式（避免第一个总是exp(x1)）
+                if len(candidates) > 1:
+                    selected_sample = candidates[1]
+                else:
+                    selected_sample = candidates[0]
+            else:
+                # 如果都重复，使用第一个
+                selected_sample = pretrain_data[0]
+            
+            true_expression = selected_sample['expression']
+            samples = selected_sample['samples']
+            logger.info(f"使用表达式进行测试: {true_expression} (在预训练数据中出现{expression_counts[true_expression]}次)")
+            
+            # 使用预训练数据中的实际样本
+            X = np.array([[sample['X']] for sample in samples]).astype(np.float32)
+            y = np.array([sample['y'] for sample in samples]).astype(np.float32)
+
             problem_data = {
                 'true_expression': true_expression,
-                'X': dataset.X,
-                'y': dataset.y,
-                'variables': dataset.variables
+                'X': X,
+                'y': y,
+                'variables': ['x1']  # 单变量表达式
             }
-        elif args.generate_data or args.test:
-            problem_data = create_test_problem()
         else:
-            logger.error("请提供--expression参数或使用--generate-data标志")
+            logger.error("预训练数据文件不存在或加载失败")
             return 1
         
         print(f"\n问题设置:")
         print(f"真实表达式: {problem_data['true_expression']}")
         print(f"数据形状: {problem_data['X'].shape}")
         print(f"变量: {problem_data['variables']}")
+        
+        # 显示预训练状态
+        if pretrain_data:
+            print(f"已加载预训练数据样本数量: {len(pretrain_data)}")
+            print(f"预训练数据来源: {pretrain_data_path}")
+        if pretrained_path and os.path.exists(pretrained_path):
+            print(f"预训练权重来源: {pretrained_path}")
+        else:
+            print("使用随机初始化的模型权重")
         
         # 开始在线微调
         logger.info("开始在线微调循环...")

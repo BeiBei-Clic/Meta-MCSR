@@ -164,17 +164,26 @@ class PretrainPipeline:
     
     def _setup_logging(self):
         """设置日志"""
+        # 确保日志目录存在
+        os.makedirs('results/logs', exist_ok=True)
+
         logger = logging.getLogger('pretrain')
         logger.setLevel(logging.INFO)
-        
-        if not logger.handlers:
-            handler = logging.StreamHandler()
-            formatter = logging.Formatter(
-                '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-            )
-            handler.setFormatter(formatter)
-            logger.addHandler(handler)
-            
+
+        # 阻止消息传播到父级logger，避免重复输出
+        logger.propagate = False
+
+        # 清除已有的handlers
+        logger.handlers.clear()
+
+        # 只添加文件handler，避免与tqdm进度条冲突
+        handler = logging.FileHandler('results/logs/pretrain.log')
+        formatter = logging.Formatter(
+            '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+        )
+        handler.setFormatter(formatter)
+        logger.addHandler(handler)
+
         return logger
     
     def generate_pretrain_data(
@@ -380,9 +389,7 @@ class PretrainPipeline:
         total_loss = 0.0
         total_samples = 0
         
-        progress_bar = tqdm(dataloader, desc=f"Epoch {self.epoch}")
-        
-        for batch_idx, (expressions, X_list, y_list) in enumerate(progress_bar):
+        for batch_idx, (expressions, X_list, y_list) in enumerate(dataloader):
             batch_size = len(expressions)
             
             # 计算批次级别的对比学习损失
@@ -404,12 +411,6 @@ class PretrainPipeline:
             # 统计
             total_loss += batch_loss.item() * batch_size
             total_samples += batch_size
-            
-            # 更新进度条
-            progress_bar.set_postfix({
-                'Loss': f'{batch_loss.item():.4f}',
-                'LR': f'{self.optimizer.param_groups[0]["lr"]:.2e}'
-            })
             
             self.global_step += 1
         
@@ -527,13 +528,15 @@ class PretrainPipeline:
         
         self.logger.info("开始预训练...")
         
-        for epoch in range(self.config['num_epochs']):
+        epoch_pbar = tqdm(range(self.config['num_epochs']), desc="Training Epochs", leave=True)
+
+        for epoch in epoch_pbar:
             self.epoch = epoch
-            
+
             # 训练
             train_metrics = self.train_epoch(train_loader)
             train_history['loss'].append(train_metrics['loss'])
-            
+
             # 验证
             val_metrics = self.validate(val_loader)
             val_history['loss'].append(val_metrics['loss'])
@@ -541,18 +544,38 @@ class PretrainPipeline:
             # 更新学习率调度器
             self.scheduler.step(val_metrics['loss'])
 
-            # 记录日志
-            self.logger.info(
-                f"Epoch {epoch}: Train Loss = {train_metrics['loss']:.4f}, "
-                f"Val Loss = {val_metrics['loss']:.4f}, "
-                f"LR = {self.scheduler.get_last_lr()[0]:.2e}"
-            )
+            # 使用tqdm的set_postfix显示训练信息
+            current_lr = self.scheduler.get_last_lr()[0]
+            postfix_info = {
+                'Train Loss': f"{train_metrics['loss']:.4f}",
+                'Val Loss': f"{val_metrics['loss']:.4f}",
+                'LR': f"{current_lr:.2e}"
+            }
 
             # 保存最佳模型
+            best_model_saved = False
             if val_metrics['loss'] < self.best_loss:
                 self.best_loss = val_metrics['loss']
                 self.save_pretrained()
+                best_model_saved = True
                 self.logger.info(f"新的最佳模型已保存，验证损失: {self.best_loss:.4f}")
+
+            # 如果保存了最佳模型，在postfix中显示
+            if best_model_saved:
+                postfix_info['Best Model'] = "✓"
+            else:
+                postfix_info['Best Model'] = ""
+
+            epoch_pbar.set_postfix(postfix_info)
+
+            # 记录详细日志到文件
+            self.logger.info(
+                f"Epoch {epoch}: Train Loss = {train_metrics['loss']:.4f}, "
+                f"Val Loss = {val_metrics['loss']:.4f}, "
+                f"LR = {current_lr:.2e}"
+            )
+
+        epoch_pbar.close()
         
         self.logger.info("预训练完成！")
         return {
@@ -585,17 +608,18 @@ class PretrainPipeline:
         """保存预训练模型"""
         if save_path is None:
             save_path = self.config.get('output_dir', 'models_weights/pretrained/')
-        
+
+        # 确保保存目录存在
         os.makedirs(save_path, exist_ok=True)
-        
+
         # 保存表达式编码器
         expr_path = os.path.join(save_path, 'expression_encoder')
         self.expression_encoder.save_pretrained(expr_path)
-        
+
         # 保存数据编码器
         data_path = os.path.join(save_path, 'data_encoder')
         self.data_encoder.save_pretrained(data_path)
-        
+
         # 保存训练配置
         config_path = os.path.join(save_path, 'training_config.json')
         with open(config_path, 'w') as f:
@@ -606,7 +630,7 @@ class PretrainPipeline:
                 'global_step': self.global_step,
                 'epoch': self.epoch
             }, f, indent=2)
-        
+
         self.logger.info(f"预训练模型已保存到 {save_path}")
     
     def load_pretrained(self, load_path: str):

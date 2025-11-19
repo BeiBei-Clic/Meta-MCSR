@@ -104,6 +104,9 @@ def load_single_file_data(file_path: str) -> Optional[List[Dict[str, Any]]]:
 
 def setup_logging():
     """设置日志"""
+    # 确保日志目录存在
+    os.makedirs('results/logs', exist_ok=True)
+
     logging.basicConfig(
         level=logging.INFO,
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -403,7 +406,7 @@ def main():
             
         # 保存最终结果
         pretrain_pipeline.save_pretrained()
-        
+
         # 打印结果
         print("\n" + "=" * 60)
         print("预训练完成！")
@@ -411,6 +414,7 @@ def main():
         print(f"最终训练损失: {training_history['train_loss']['loss'][-1]:.4f}")
         print(f"最终验证损失: {training_history['val_loss']['loss'][-1]:.4f}")
         print(f"模型保存路径: {config['training']['pretrain']['output_dir']}")
+        print(f"日志保存路径: results/logs/pretrain.log")
         
         return 0
         

@@ -26,6 +26,82 @@ from symbolic_regression.training.pretrain_pipeline import PretrainPipeline
 from symbolic_regression.utils.data_loader import DataLoader
 
 
+def load_single_file_data(file_path: str) -> Optional[List[Dict[str, Any]]]:
+    """加载单个文件的预训练数据，支持任意维度"""
+    if not os.path.exists(file_path):
+        print(f"文件不存在: {file_path}")
+        return None
+    
+    try:
+        pretrain_data = []
+        
+        with open(file_path, 'r', encoding='utf-8') as f:
+            lines = f.readlines()
+        
+        if len(lines) < 2:
+            print(f"文件内容不足: {file_path}")
+            return None
+        
+        # 解析第一行的表达式
+        first_line = lines[0].strip()
+        if first_line.startswith('表达式: '):
+            current_expression = first_line.replace('表达式: ', '').strip()
+            print(f"找到表达式: {current_expression}")
+        else:
+            print(f"第一行格式错误: {first_line[:50]}...")
+            return None
+        
+        # 解析数据行
+        samples = []
+        for line in lines[1:]:
+            line = line.strip()
+            if not line:
+                continue
+            
+            try:
+                # 解析任意维度数据格式: x1,x2,x3,...,y
+                parts = line.split(',')
+                if len(parts) >= 2:  # 至少要有x变量和y值
+                    # 最后一个值是y，前面的都是x变量
+                    x_values = [float(part) for part in parts[:-1]]
+                    y_value = float(parts[-1])
+                    
+                    # 动态生成变量名 x1, x2, x3, ...
+                    sample = {'y': y_value}
+                    for i, x_val in enumerate(x_values, 1):
+                        sample[f'x{i}'] = x_val
+                    
+                    samples.append(sample)
+                else:
+                    print(f"数据格式错误: {line}")
+            except (ValueError, IndexError) as e:
+                print(f"解析数据失败: {line} (错误: {e})")
+                continue
+        
+        if current_expression and samples:
+            # 动态获取变量名
+            variables = []
+            if samples:
+                for key in sorted(samples[0].keys()):
+                    if key.startswith('x'):
+                        variables.append(key)
+            
+            pretrain_data.append({
+                'expression': current_expression,
+                'samples': samples,
+                'variables': variables
+            })
+            print(f"加载样本数量: {len(samples)}, 变量维度: {len(variables)}")
+        
+        return pretrain_data if pretrain_data else None
+        
+    except Exception as e:
+        print(f"加载文件数据失败: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
+
+
 def setup_logging():
     """设置日志"""
     logging.basicConfig(
@@ -87,14 +163,19 @@ def load_pretrain_data(pretrain_data_path: str = "data/pysr_datasets") -> Option
                         continue
                     
                     try:
-                        # 解析 x1,x2,y 格式
+                        # 解析任意维度数据格式: x1,x2,x3,...,y
                         parts = line.split(',')
-                        if len(parts) >= 3:
-                            x1 = float(parts[0])
-                            x2 = float(parts[1])
-                            y = float(parts[2])
+                        if len(parts) >= 2:  # 至少要有x变量和y值
+                            # 最后一个值是y，前面的都是x变量
+                            x_values = [float(part) for part in parts[:-1]]
+                            y_value = float(parts[-1])
                             
-                            samples.append({'x1': x1, 'x2': x2, 'y': y})
+                            # 动态生成变量名 x1, x2, x3, ...
+                            sample = {'y': y_value}
+                            for i, x_val in enumerate(x_values, 1):
+                                sample[f'x{i}'] = x_val
+                            
+                            samples.append(sample)
                         else:
                             print(f"    数据格式错误: {line}")
                     except (ValueError, IndexError) as e:
@@ -102,12 +183,20 @@ def load_pretrain_data(pretrain_data_path: str = "data/pysr_datasets") -> Option
                         continue
                 
                 if current_expression and samples:
+                    # 动态获取变量名（从样本中推断维度）
+                    variables = []
+                    if samples:
+                        # 从第一个样本中获取所有x变量名
+                        for key in sorted(samples[0].keys()):
+                            if key.startswith('x'):
+                                variables.append(key)
+                    
                     pretrain_data.append({
                         'expression': current_expression,
                         'samples': samples,
-                        'variables': ['x1', 'x2']  # 双变量表达式
+                        'variables': variables  # 动态变量列表
                     })
-                    print(f"  加载样本数量: {len(samples)}")
+                    print(f"  加载样本数量: {len(samples)}, 变量维度: {len(variables)}")
                     count += 1
                 else:
                     print(f"  文件 {file_name} 无有效数据")
@@ -120,7 +209,7 @@ def load_pretrain_data(pretrain_data_path: str = "data/pysr_datasets") -> Option
             
             return pretrain_data
         
-        # 如果是文件，保持原有逻辑（兼容性）
+        # 如果是单个文件，保持原有逻辑（兼容性）
         else:
             return load_single_file_data(pretrain_data_path)
             
@@ -130,55 +219,8 @@ def load_pretrain_data(pretrain_data_path: str = "data/pysr_datasets") -> Option
         traceback.print_exc()
         return None
 
-
-def load_single_file_data(file_path: str) -> Optional[Dict[str, Any]]:
-    """加载单个文件的预训练数据（原格式兼容性）"""
-    # 这里保持原有逻辑的简化版本
-    pretrain_data = []
-    try:
-        with open(file_path, 'r') as f:
-            lines = f.readlines()
-        
-        current_expression = None
-        samples = []
-        
-        for line in lines:
-            line = line.strip()
-            
-            if line.startswith('Expression: '):
-                if current_expression and samples:
-                    pretrain_data.append({
-                        'expression': current_expression,
-                        'samples': samples
-                    })
-                current_expression = line.replace('Expression: ', '').strip()
-                samples = []
-            elif line.startswith('Sample ') and 'X=' in line:
-                try:
-                    import re
-                    match = re.search(r'X=\[(.*?)\], y=(.*)', line)
-                    if match:
-                        x_value = float(match.group(1))
-                        y_value = float(match.group(2))
-                        samples.append({'X': x_value, 'y': y_value})
-                except (ValueError, IndexError):
-                    continue
-        
-        # 添加最后一个表达式
-        if current_expression and samples:
-            pretrain_data.append({
-                'expression': current_expression,
-                'samples': samples
-            })
-        
-        return pretrain_data
-    except Exception as e:
-        print(f"加载单个文件数据失败: {e}")
-        return None
-
-
 def convert_pysr_data_to_pretrain_format(pysr_data: List[Dict[str, Any]]) -> Tuple[List[str], List[Tuple[np.ndarray, np.ndarray]]]:
-    """将PySR格式数据转换为预训练格式"""
+    """将PySR格式数据转换为预训练格式，支持任意维度"""
     expressions = []
     datasets = []
     
@@ -186,22 +228,31 @@ def convert_pysr_data_to_pretrain_format(pysr_data: List[Dict[str, Any]]) -> Tup
         expression = item['expression']
         samples = item['samples']
         
-        # 提取X和y数据
+        # 提取X和y数据，支持任意维度
         if len(samples) > 0:
-            if 'x1' in samples[0] and 'x2' in samples[0]:
-                # 双变量格式
-                X = np.array([[sample['x1'], sample['x2']] for sample in samples]).astype(np.float32)
-            elif 'X' in samples[0]:
-                # 单变量格式（兼容性）
-                X = np.array([[sample['X']] for sample in samples]).astype(np.float32)
+            # 动态获取所有x变量名（按数字顺序排列）
+            x_variables = []
+            if 'variables' in item and item['variables']:
+                # 如果有明确的变量列表，使用它
+                x_variables = sorted([var for var in item['variables'] if var.startswith('x')])
             else:
-                # 默认单变量
-                X = np.array([[sample.get('x1', 0)] for sample in samples]).astype(np.float32)
+                # 否则从样本中推断
+                x_variables = sorted([key for key in samples[0].keys() if key.startswith('x')], 
+                                   key=lambda x: int(x[1:]))  # 按数字部分排序
+            
+            # 构建X矩阵
+            if x_variables:
+                X = np.array([[sample[var] for var in x_variables] for sample in samples]).astype(np.float32)
+            else:
+                # 兼容性：如果没有x变量，创建一个虚拟维度
+                X = np.array([[0.0] for sample in samples]).astype(np.float32)
             
             y = np.array([sample['y'] for sample in samples]).astype(np.float32)
             
             expressions.append(expression)
             datasets.append((X, y))
+            
+            print(f"  转换表达式: {expression[:50]}..., 维度: {X.shape[1]}")
     
     return expressions, datasets
 

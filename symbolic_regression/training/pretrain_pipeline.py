@@ -385,21 +385,8 @@ class PretrainPipeline:
         for batch_idx, (expressions, X_list, y_list) in enumerate(progress_bar):
             batch_size = len(expressions)
             
-            # 准备数据
-            batch_losses = []
-            
-            for i in range(batch_size):
-                # 获取表达式和数据
-                expr = expressions[i]
-                X = X_list[i]
-                y = y_list[i]
-                
-                # 计算损失
-                loss = self._compute_contrastive_loss(expr, (X, y))
-                batch_losses.append(loss)
-            
-            # 批次平均损失
-            batch_loss = torch.stack(batch_losses).mean()
+            # 计算批次级别的对比学习损失
+            batch_loss = self._compute_contrastive_loss(expressions, X_list, y_list)
             
             # 反向传播
             self.optimizer.zero_grad()
@@ -431,35 +418,64 @@ class PretrainPipeline:
     
     def _compute_contrastive_loss(
         self,
-        expression: str,
-        data_tuple: Tuple[np.ndarray, np.ndarray]
+        expressions: List[str],
+        X_list: List[np.ndarray],
+        y_list: List[np.ndarray]
     ) -> torch.Tensor:
-        """计算对比学习损失"""
-        X, y = data_tuple
-
+        """计算对称性对比学习损失 (InfoNCE Loss)"""
+        batch_size = len(expressions)
+        
         # 确保模型在训练模式以获得梯度
         self.expression_encoder.train()
         self.data_encoder.train()
 
-        # 将数据转换为张量
-        X_tensor = torch.FloatTensor(X).to(self.device)
-        y_tensor = torch.FloatTensor(y).to(self.device)
-
-        # 计算嵌入向量 - 直接使用模型输出，保持梯度跟踪
-        expr_embedding = self.expression_encoder.encode(expression, training=True)
-        data_embedding = self.data_encoder.encode(X_tensor, y_tensor)
-
-        # 添加批次维度
-        expr_embedding = expr_embedding.unsqueeze(0)  # (1, embedding_dim)
-        data_embedding = data_embedding.unsqueeze(0)  # (1, embedding_dim)
-
-        # 计算余弦相似度
-        similarity = F.cosine_similarity(expr_embedding, data_embedding)
-
-        # 将相似度转换为损失 - 对于正样本，我们希望相似度越高越好
-        loss = -similarity.mean() / self.temperature
-
-        return loss
+        # 计算所有表达式的嵌入向量
+        expr_embeddings = []
+        for expr in expressions:
+            embedding = self.expression_encoder.encode(expr, training=True)
+            expr_embeddings.append(embedding)
+        
+        # 计算所有数据的嵌入向量
+        data_embeddings = []
+        for i in range(batch_size):
+            X_tensor = torch.FloatTensor(X_list[i]).to(self.device)
+            y_tensor = torch.FloatTensor(y_list[i]).to(self.device)
+            embedding = self.data_encoder.encode(X_tensor, y_tensor)
+            data_embeddings.append(embedding)
+        
+        # 转换为张量矩阵
+        expr_embeddings = torch.stack(expr_embeddings)  # (batch_size, embedding_dim)
+        data_embeddings = torch.stack(data_embeddings)  # (batch_size, embedding_dim)
+        
+        # 计算余弦相似度矩阵
+        # 归一化嵌入向量
+        expr_embeddings_norm = F.normalize(expr_embeddings, p=2, dim=1)
+        data_embeddings_norm = F.normalize(data_embeddings, p=2, dim=1)
+        
+        # 计算所有配对的余弦相似度
+        # s(E,D) = cos(e, d)
+        similarity_matrix = torch.matmul(expr_embeddings_norm, data_embeddings_norm.transpose(0, 1))  # (batch_size, batch_size)
+        
+        # 应用温度缩放
+        similarity_matrix = similarity_matrix / self.temperature
+        
+        # 移除对角线元素(自身)，创建负样本
+        # 保留对角线作为正样本，用于计算目标标签
+        labels = torch.arange(batch_size).to(self.device)
+        
+        # 对称性InfoNCE损失
+        # 第一个方向: 表达式->数据的对比损失
+        logits_expr_to_data = similarity_matrix  # (batch_size, batch_size)
+        loss_expr_to_data = self.info_nce_loss(logits_expr_to_data, labels)
+        
+        # 第二个方向: 数据->表达式的对比损失
+        logits_data_to_expr = similarity_matrix.transpose(0, 1)  # (batch_size, batch_size)
+        loss_data_to_expr = self.info_nce_loss(logits_data_to_expr, labels)
+        
+        # 对称性损失: 取两个方向的平均值
+        contrastive_loss = 0.5 * (loss_expr_to_data + loss_data_to_expr)
+        
+        return contrastive_loss
     
     def fit(
         self,
@@ -556,16 +572,9 @@ class PretrainPipeline:
             for expressions, X_list, y_list in dataloader:
                 batch_size = len(expressions)
                 
-                batch_losses = []
-                for i in range(batch_size):
-                    expr = expressions[i]
-                    X = X_list[i]
-                    y = y_list[i]
-                    
-                    loss = self._compute_contrastive_loss(expr, (X, y))
-                    batch_losses.append(loss)
+                # 计算批次级别的对比学习损失
+                batch_loss = self._compute_contrastive_loss(expressions, X_list, y_list)
                 
-                batch_loss = torch.stack(batch_losses).mean()
                 total_loss += batch_loss.item() * batch_size
                 total_samples += batch_size
         

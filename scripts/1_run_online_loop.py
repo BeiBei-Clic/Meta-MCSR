@@ -67,83 +67,134 @@ def load_config(config_path: str = "config.yaml") -> Dict[str, Any]:
         return get_default_config()
 
 
-def load_pretrain_data(pretrain_data_path: str = "data/pretrain/progress_100000/datasets.txt") -> Optional[Dict[str, Any]]:
+def load_pretrain_data(pretrain_data_path: str = "data/pysr_datasets") -> Optional[Dict[str, Any]]:
     """加载预训练数据"""
     if not os.path.exists(pretrain_data_path):
-        print(f"警告：预训练数据文件 {pretrain_data_path} 不存在")
+        print(f"警告：预训练数据路径 {pretrain_data_path} 不存在")
         return None
     
     try:
-        # 加载预训练数据，解析特定格式
-        pretrain_data = []
-        current_expression = None
-        
-        with open(pretrain_data_path, 'r') as f:
-            lines = f.readlines()
-        
-        i = 0
-        max_expressions = 3  # 限制只处理前3个表达式用于测试
-        count = 0
-        
-        while i < len(lines) and count < max_expressions:
-            line = lines[i].strip()
+        # 如果是目录，读取所有txt文件
+        if os.path.isdir(pretrain_data_path):
+            pretrain_data = []
+            txt_files = sorted([f for f in os.listdir(pretrain_data_path) if f.endswith('.txt')])
             
-            # 查找表达式定义
-            if line.startswith('Expression: '):
-                current_expression = line.replace('Expression: ', '').strip()
-                print(f"找到表达式 {count+1}: {current_expression}")
+            print(f"在目录 {pretrain_data_path} 中找到 {len(txt_files)} 个数据文件")
+            
+            # 限制处理的文件数量
+            max_files = min(5, len(txt_files))  # 只处理前5个文件用于测试
+            count = 0
+            
+            for file_name in txt_files[:max_files]:
+                file_path = os.path.join(pretrain_data_path, file_name)
+                print(f"处理文件: {file_name}")
                 
-                # 跳过Sample input data行
-                i += 1
-                if i < len(lines) and lines[i].strip() == 'Sample input data:':
-                    i += 1
+                with open(file_path, 'r') as f:
+                    lines = f.readlines()
+                
+                if len(lines) < 2:
+                    print(f"  文件 {file_name} 内容不足，跳过")
+                    continue
+                
+                # 解析第一行的表达式
+                first_line = lines[0].strip()
+                if first_line.startswith('表达式: '):
+                    current_expression = first_line.replace('表达式: ', '').strip()
+                    print(f"  找到表达式: {current_expression}")
+                else:
+                    print(f"  文件 {file_name} 第一行格式错误: {first_line[:50]}...")
+                    continue
+                
+                # 解析数据行
+                samples = []
+                for line in lines[1:]:
+                    line = line.strip()
+                    if not line:
+                        continue
                     
-                    # 收集这个表达式的样本数据
-                    samples = []
-                    while i < len(lines):
-                        sample_line = lines[i].strip()
-                        
-                        # 检查是否到达下一个表达式或文件结尾
-                        if lines[i].strip().startswith('===') or lines[i].strip().startswith('Expression:'):
-                            break
+                    try:
+                        # 解析 x1,x2,y 格式
+                        parts = line.split(',')
+                        if len(parts) >= 3:
+                            x1 = float(parts[0])
+                            x2 = float(parts[1])
+                            y = float(parts[2])
                             
-                        # 解析样本数据
-                        if sample_line.startswith('Sample ') and 'X=' in sample_line and 'y=' in sample_line:
-                            try:
-                                # 使用正则表达式解析
-                                import re
-                                match = re.search(r'X=\[(.*?)\], y=(.*)', sample_line)
-                                if match:
-                                    x_value = float(match.group(1))
-                                    y_value = float(match.group(2))
-                                    
-                                    samples.append({'X': x_value, 'y': y_value})
-                                else:
-                                    print(f"  正则解析失败: {sample_line[:50]}...")
-                            except (ValueError, IndexError) as e:
-                                # 如果解析失败，跳过这个样本
-                                print(f"  解析样本失败: {sample_line[:50]}... (错误: {e})")
-                                pass
-                        
-                        i += 1
-                    
-                    # 如果有表达式和数据，添加到pretrain_data
-                    if current_expression and samples:
-                        pretrain_data.append({
-                            'expression': current_expression,
-                            'samples': samples
-                        })
-                        print(f"  加载样本数量: {len(samples)}")
-                        count += 1
-            else:
-                i += 1
+                            samples.append({'x1': x1, 'x2': x2, 'y': y})
+                        else:
+                            print(f"    数据格式错误: {line}")
+                    except (ValueError, IndexError) as e:
+                        print(f"    解析数据失败: {line} (错误: {e})")
+                        continue
+                
+                if current_expression and samples:
+                    pretrain_data.append({
+                        'expression': current_expression,
+                        'samples': samples,
+                        'variables': ['x1', 'x2']  # 双变量表达式
+                    })
+                    print(f"  加载样本数量: {len(samples)}")
+                    count += 1
+                else:
+                    print(f"  文件 {file_name} 无有效数据")
+            
+            print(f"成功加载 {len(pretrain_data)} 个表达式数据")
+            return pretrain_data
         
-        print(f"成功加载 {len(pretrain_data)} 个预训练样本")
-        return pretrain_data
+        # 如果是文件，保持原有逻辑（兼容性）
+        else:
+            return load_single_file_data(pretrain_data_path)
+            
     except Exception as e:
         print(f"加载预训练数据失败: {e}")
         import traceback
         traceback.print_exc()
+        return None
+
+
+def load_single_file_data(file_path: str) -> Optional[Dict[str, Any]]:
+    """加载单个文件的预训练数据（原格式兼容性）"""
+    # 这里保持原有逻辑的简化版本
+    pretrain_data = []
+    try:
+        with open(file_path, 'r') as f:
+            lines = f.readlines()
+        
+        current_expression = None
+        samples = []
+        
+        for line in lines:
+            line = line.strip()
+            
+            if line.startswith('Expression: '):
+                if current_expression and samples:
+                    pretrain_data.append({
+                        'expression': current_expression,
+                        'samples': samples
+                    })
+                current_expression = line.replace('Expression: ', '').strip()
+                samples = []
+            elif line.startswith('Sample ') and 'X=' in line:
+                try:
+                    import re
+                    match = re.search(r'X=\[(.*?)\], y=(.*)', line)
+                    if match:
+                        x_value = float(match.group(1))
+                        y_value = float(match.group(2))
+                        samples.append({'X': x_value, 'y': y_value})
+                except (ValueError, IndexError):
+                    continue
+        
+        # 添加最后一个表达式
+        if current_expression and samples:
+            pretrain_data.append({
+                'expression': current_expression,
+                'samples': samples
+            })
+        
+        return pretrain_data
+    except Exception as e:
+        print(f"加载单个文件数据失败: {e}")
         return None
 
 
@@ -265,7 +316,7 @@ def main():
         
         # 自动加载预训练数据
         pretrain_data = None
-        pretrain_data_path = "data/pretrain/progress_100000/datasets.txt"
+        pretrain_data_path = "data/pysr_datasets"
         
         pretrain_data = load_pretrain_data(pretrain_data_path)
         if pretrain_data:
@@ -282,43 +333,33 @@ def main():
         
         # 准备数据
         if pretrain_data:
-            # 选择不重复的表达式进行测试，避免过拟合
-            selected_sample = None
-            target_expression = None
-            
-            # 查找不重复的表达式
-            expression_counts = {}
-            for sample in pretrain_data:
-                expr = sample['expression']
-                expression_counts[expr] = expression_counts.get(expr, 0) + 1
-            
-            # 选择重复次数较少的表达式
-            candidates = [sample for sample in pretrain_data 
-                         if expression_counts[sample['expression']] <= 5]
-            
-            if candidates:
-                # 选择第二个表达式（避免第一个总是exp(x1)）
-                if len(candidates) > 1:
-                    selected_sample = candidates[1]
-                else:
-                    selected_sample = candidates[0]
-            else:
-                # 如果都重复，使用第一个
-                selected_sample = pretrain_data[0]
+            # 选择第一个表达式进行测试
+            selected_sample = pretrain_data[0]
             
             true_expression = selected_sample['expression']
             samples = selected_sample['samples']
-            logger.info(f"使用表达式进行测试: {true_expression} (在预训练数据中出现{expression_counts[true_expression]}次)")
+            variables = selected_sample.get('variables', ['x1'])  # 获取变量列表
+            logger.info(f"使用表达式进行测试: {true_expression}")
             
-            # 使用预训练数据中的实际样本
-            X = np.array([[sample['X']] for sample in samples]).astype(np.float32)
+            # 根据变量数量构建X数组
+            if variables == ['x1', 'x2'] or len(variables) == 2:
+                # 双变量表达式
+                X = np.array([[sample['x1'], sample['x2']] for sample in samples]).astype(np.float32)
+            else:
+                # 单变量表达式（兼容原格式）
+                if 'X' in samples[0]:
+                    X = np.array([[sample['X']] for sample in samples]).astype(np.float32)
+                else:
+                    # 如果是新格式但只有x1变量
+                    X = np.array([[sample.get('x1', 0)] for sample in samples]).astype(np.float32)
+            
             y = np.array([sample['y'] for sample in samples]).astype(np.float32)
 
             problem_data = {
                 'true_expression': true_expression,
                 'X': X,
                 'y': y,
-                'variables': ['x1']  # 单变量表达式
+                'variables': variables
             }
         else:
             logger.error("预训练数据文件不存在或加载失败")
@@ -406,17 +447,28 @@ def calculate_r2_score(X, y, expression):
         # 解析表达式
         expr_str = expression.replace('^', '**')
         
-        # 安全的表达式求值
+        # 根据X的形状构建变量字典
         allowed_names = {
-            'x1': X[:, 0], 'x2': X[:, 1], 'sin': np.sin, 'cos': np.cos,
+            'sin': np.sin, 'cos': np.cos,
             'exp': np.exp, 'log': np.log, 'sqrt': np.sqrt, 'abs': np.abs
         }
+        
+        # 添加变量到允许的名称中
+        if X.shape[1] >= 1:
+            allowed_names['x1'] = X[:, 0]
+        if X.shape[1] >= 2:
+            allowed_names['x2'] = X[:, 1]
+        if X.shape[1] >= 3:
+            allowed_names['x3'] = X[:, 2]
+        if X.shape[1] >= 4:
+            allowed_names['x4'] = X[:, 3]
         
         y_pred = eval(expr_str, {"__builtins__": {}}, allowed_names)
         
         return R2_score(y, y_pred)
         
-    except Exception:
+    except Exception as e:
+        print(f"R2计算失败: {e}")
         return -np.inf
 
 

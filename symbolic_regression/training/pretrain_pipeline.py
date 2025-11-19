@@ -476,13 +476,13 @@ class PretrainPipeline:
         Returns:
             训练历史
         """
-        # 分割训练和验证集
-        train_expr, val_expr = train_test_split(
-            expressions, test_size=0.2, random_state=42
+        # 分割训练和验证集 - 使用组合索引确保数据一致性
+        combined_data = list(zip(expressions, datasets))
+        train_combined, val_combined = train_test_split(
+            combined_data, test_size=0.2, random_state=42
         )
-        train_data, val_data = train_test_split(
-            datasets, test_size=0.2, random_state=42
-        )
+        train_expr, train_data = zip(*train_combined) if train_combined else ([], [])
+        val_expr, val_data = zip(*val_combined) if val_combined else ([], [])
         
         # 创建数据集
         train_dataset = ContrastiveDataset(train_expr, train_data)

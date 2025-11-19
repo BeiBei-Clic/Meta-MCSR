@@ -378,45 +378,30 @@ def main():
         else:
             logger.warning("PySR格式数据不存在，使用原格式数据")
             
-            # 设置预训练数据路径（原格式）
-            pretrain_data_path = "data/pretrain/progress_100000/datasets.txt"
-            
-            # 检查数据文件是否存在
-            if not os.path.exists(pretrain_data_path):
-                logger.warning(f"预训练数据文件不存在: {pretrain_data_path}")
-                logger.info("开始自动生成预训练数据...")
-                
-                # 运行数据生成脚本
-                try:
-                    # 优先尝试PySR数据生成器
-                    pysr_generate_script_path = os.path.join(project_root, 'scripts', 'generate_pretrain_data_PySR.py')
-                    if os.path.exists(pysr_generate_script_path):
-                        logger.info(f"执行PySR数据生成器: {pysr_generate_script_path}")
-                        result = subprocess.run([sys.executable, pysr_generate_script_path], 
-                                              capture_output=True, text=True, cwd=str(project_root))
-                        if result.returncode == 0:
-                            logger.info("PySR数据生成完成")
-                            pysr_data = load_pretrain_data(pysr_data_path)
-                            if pysr_data:
-                                expressions, datasets = convert_pysr_data_to_pretrain_format(pysr_data)
-                                logger.info(f"转换后数据: {len(expressions)} 个表达式")
-                                training_history = pretrain_pipeline.fit(expressions=expressions, datasets=datasets)
-                            else:
-                                logger.error("PySR数据生成后仍无法加载数据")
-                                raise FileNotFoundError("PySR数据生成失败")
-                        else:
-                            logger.error(f"PySR数据生成失败: {result.stderr}")
-                            raise FileNotFoundError("PySR数据生成失败")
+            # 运行数据生成脚本
+            try:
+                # 优先尝试PySR数据生成器
+                pysr_generate_script_path = os.path.join(project_root, 'scripts', 'generate_pretrain_data_PySR.py')
+                logger.info(f"执行PySR数据生成器: {pysr_generate_script_path}")
+                result = subprocess.run([sys.executable, pysr_generate_script_path], 
+                                        capture_output=True, text=True, cwd=str(project_root))
+                if result.returncode == 0:
+                    logger.info("PySR数据生成完成")
+                    pysr_data = load_pretrain_data(pysr_data_path)
+                    if pysr_data:
+                        expressions, datasets = convert_pysr_data_to_pretrain_format(pysr_data)
+                        logger.info(f"转换后数据: {len(expressions)} 个表达式")
+                        training_history = pretrain_pipeline.fit(expressions=expressions, datasets=datasets)
                     else:
-                        # 回退到原来的数据生成器
-                        from scripts.generate_pretrain_data import main as generate_data_main
-                        generate_data_main()
-                        logger.info("原格式预训练数据生成完成")
-                except Exception as e:
-                    logger.error(f"自动生成数据失败: {e}")
-                    raise FileNotFoundError(f"无法生成预训练数据: {e}")
+                        logger.error("PySR数据生成后仍无法加载数据")
+                        raise FileNotFoundError("PySR数据生成失败")
+                else:
+                    logger.error(f"PySR数据生成失败: {result.stderr}")
+                    raise FileNotFoundError("PySR数据生成失败")
+            except Exception as e:
+                logger.error(f"自动生成数据失败: {e}")
+                raise FileNotFoundError(f"无法生成预训练数据: {e}")
             
-            logger.info(f"使用原格式预训练数据文件: {pretrain_data_path}")
             # 开始预训练，从指定文件加载数据
             training_history = pretrain_pipeline.fit(data_path=pretrain_data_path)
         

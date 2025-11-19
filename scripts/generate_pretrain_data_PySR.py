@@ -47,14 +47,10 @@ class PySRDataGenerator:
             PhysicsFormula("重力势能", "力学", "m * g * h", ["m", "g", "h"], "重力势能", 2),
             PhysicsFormula("简谐振动", "力学", "A * sin(omega * t)", ["A", "omega", "t"], "简谐振动位移", 3),
             PhysicsFormula("波动方程", "力学", "A * sin(k*x - omega*t)", ["A", "k", "x", "omega", "t"], "一维波动方程", 4),
-            PhysicsFormula("胡克定律", "力学", "k * x", ["k", "x"], "弹性力定律", 1),
-            PhysicsFormula("动量", "力学", "m * v", ["m", "v"], "线性动量", 1),
-            PhysicsFormula("角动量", "力学", "I * omega", ["I", "omega"], "角动量", 2),
             PhysicsFormula("万有引力", "力学", "G * m1 * m2 / r**2", ["G", "m1", "m2", "r"], "万有引力定律", 3),
             PhysicsFormula("自由落体", "力学", "h0 + v0*t - 0.5*g*t**2", ["h0", "v0", "t", "g"], "自由落体运动", 3),
             
             # 电磁学
-            PhysicsFormula("库仑定律", "电磁学", "k * q1 * q2 / r**2", ["k", "q1", "q2", "r"], "点电荷相互作用力", 3),
             PhysicsFormula("电场强度", "电磁学", "F / q", ["F", "q"], "电场强度定义", 1),
             PhysicsFormula("电势", "电磁学", "k * q / r", ["k", "q", "r"], "点电荷电势", 2),
             PhysicsFormula("电容", "电磁学", "Q / V", ["Q", "V"], "电容定义", 1),
@@ -64,7 +60,6 @@ class PySRDataGenerator:
             PhysicsFormula("洛伦兹力", "电磁学", "q * E + q * v", ["q", "E", "v"], "洛伦兹力公式", 4),
             
             # 热力学
-            PhysicsFormula("理想气体状态方程", "热力学", "n * R * T", ["n", "R", "T"], "理想气体定律", 2),
             PhysicsFormula("内能变化", "热力学", "Q - W", ["Q", "W"], "热力学第一定律", 1),
             PhysicsFormula("熵变", "热力学", "Q_rev / T", ["Q_rev", "T"], "熵变定义", 2),
             PhysicsFormula("热传导", "热力学", "k * A * deltaT / d", ["k", "A", "deltaT", "d"], "傅里叶热传导定律", 3),
@@ -73,14 +68,10 @@ class PySRDataGenerator:
             # 光学
             PhysicsFormula("折射定律", "光学", "n2 * sin(theta2)", ["n2", "theta2"], "斯涅尔定律", 2),
             PhysicsFormula("薄透镜公式", "光学", "1/do + 1/di", ["do", "di"], "透镜成像公式", 2),
-            PhysicsFormula("光强", "光学", "P / A", ["P", "A"], "光强定义", 1),
             PhysicsFormula("多普勒效应", "光学", "f * (v + v_obs) / (v - v_source)", ["f", "v", "v_obs", "v_source"], "多普勒频移", 4),
             
             # 量子
-            PhysicsFormula("德布罗意关系", "量子", "h / p", ["h", "p"], "物质波波长", 2),
             PhysicsFormula("薛定谔方程", "量子", "m * v**2 / 2", ["m", "v"], "简化薛定谔方程", 5),
-            PhysicsFormula("不确定性原理", "量子", "x * p", ["x", "p"], "海森堡不确定性原理", 3),
-            PhysicsFormula("普朗克能量", "量子", "h * f", ["h", "f"], "光子能量", 1),
             
             # 统计
             PhysicsFormula("玻尔兹曼分布", "统计", "exp(-E/(k*T)) / Z", ["E", "k", "T", "Z"], "玻尔兹曼因子", 3),
@@ -169,7 +160,7 @@ class PySRDataGenerator:
         """从物理公式生成数据"""
         try:
             # 生成输入数据
-            X = np.random.uniform(-2, 2, (self.samples_per_expression, len(formula.variables)))
+            X = np.random.uniform(-10, 10, (self.samples_per_expression, len(formula.variables)))
             
             # 计算输出
             y = self._evaluate_expression(formula.expression, X, formula.variables)
@@ -210,11 +201,6 @@ class PySRDataGenerator:
                 # 第一行写标准化表达式
                 f.write(f"表达式: {standardized_expr}\n")
                 
-                # 第二行写标准表头（x1, x2, x3... + y）
-                num_vars = len(formula.variables)
-                header_parts = [f'x{i+1}' for i in range(num_vars)] + ['y']
-                f.write(','.join(header_parts) + '\n')
-                
                 # 写入数据点
                 for j in range(len(X)):
                     # 合并输入特征和输出特征
@@ -229,46 +215,6 @@ class PySRDataGenerator:
         logging.info(f"总表达式数: {len(self.physics_formulas)}")
         logging.info(f"总样本数: {len(self.physics_formulas) * self.samples_per_expression}")
         logging.info(f"输出目录: {output_dir}")
-        
-        # 生成文件列表
-        self._generate_file_list(output_dir)
-    
-    def _generate_file_list(self, output_dir: str):
-        """生成文件列表"""
-        list_file = os.path.join(output_dir, "file_list.txt")
-        
-        with open(list_file, 'w', encoding='utf-8') as f:
-            f.write("PySR格式物理公式数据集文件列表\n")
-            f.write("=" * 50 + "\n")
-            f.write(f"总表达式数: {len(self.physics_formulas)}\n")
-            f.write(f"每表达式样本数: {self.samples_per_expression}\n")
-            f.write(f"总样本数: {len(self.physics_formulas) * self.samples_per_expression}\n")
-            f.write("=" * 50 + "\n\n")
-            
-            # 按领域分组
-            domains = {}
-            for formula in self.physics_formulas:
-                if formula.domain not in domains:
-                    domains[formula.domain] = []
-                domains[formula.domain].append(formula)
-            
-            for domain, formulas in sorted(domains.items()):
-                f.write(f"\n{domain} 领域:\n")
-                f.write("-" * 30 + "\n")
-                for formula in formulas:
-                    file_index = self.physics_formulas.index(formula) + 1
-                    filename = f"{file_index:05d}.txt"
-                    # 标准化表达式
-                    standardized_expr = self._standardize_expression(formula.expression, formula.variables)
-                    # 标准变量名
-                    num_vars = len(formula.variables)
-                    standard_vars = [f'x{i+1}' for i in range(num_vars)]
-                    
-                    f.write(f"  {filename}: {formula.name}\n")
-                    f.write(f"    原始表达式: {formula.expression}\n")
-                    f.write(f"    标准化表达式: {standardized_expr}\n")
-                    f.write(f"    标准变量: {standard_vars}\n")
-                    f.write(f"    原始变量: {formula.variables}\n\n")
 
 def main():
     """主函数"""

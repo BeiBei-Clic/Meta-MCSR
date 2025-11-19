@@ -12,6 +12,7 @@ import torch
 import numpy as np
 import logging
 import argparse
+import subprocess
 from typing import Dict, Any, Optional
 from pathlib import Path
 
@@ -71,6 +72,7 @@ def load_pretrain_data(pretrain_data_path: str = "data/pysr_datasets") -> Option
     """加载预训练数据"""
     if not os.path.exists(pretrain_data_path):
         print(f"警告：预训练数据路径 {pretrain_data_path} 不存在")
+        print("尝试调用数据生成器...")
         return None
     
     try:
@@ -81,15 +83,19 @@ def load_pretrain_data(pretrain_data_path: str = "data/pysr_datasets") -> Option
             
             print(f"在目录 {pretrain_data_path} 中找到 {len(txt_files)} 个数据文件")
             
-            # 限制处理的文件数量
-            max_files = min(5, len(txt_files))  # 只处理前5个文件用于测试
-            count = 0
+            if len(txt_files) == 0:
+                print("没有找到数据文件，调用数据生成器...")
+                return None
             
-            for file_name in txt_files[:max_files]:
+            # 处理所有文件
+            count = 0
+            total_samples = 0
+            
+            for file_name in txt_files:
                 file_path = os.path.join(pretrain_data_path, file_name)
                 print(f"处理文件: {file_name}")
                 
-                with open(file_path, 'r') as f:
+                with open(file_path, 'r', encoding='utf-8') as f:
                     lines = f.readlines()
                 
                 if len(lines) < 2:
@@ -135,10 +141,16 @@ def load_pretrain_data(pretrain_data_path: str = "data/pysr_datasets") -> Option
                     })
                     print(f"  加载样本数量: {len(samples)}")
                     count += 1
+                    total_samples += len(samples)
                 else:
                     print(f"  文件 {file_name} 无有效数据")
             
-            print(f"成功加载 {len(pretrain_data)} 个表达式数据")
+            print(f"成功加载 {len(pretrain_data)} 个表达式数据，总样本数: {total_samples}")
+            
+            if len(pretrain_data) == 0:
+                print("没有加载到任何有效数据，调用数据生成器...")
+                return None
+            
             return pretrain_data
         
         # 如果是文件，保持原有逻辑（兼容性）
@@ -264,6 +276,12 @@ def main():
     setup_logging()
     logger = logging.getLogger(__name__)
     
+    logger.info("开始在线微调流程...")
+    logger.info("1. 加载配置和模型")
+    logger.info("2. 自动加载预训练数据（若不存在则自动生成）")
+    logger.info("3. 执行MCTS探索与微调")
+    logger.info("4. 保存最终结果")
+    
     # 加载配置
     try:
         config = load_config(args.config)
@@ -321,6 +339,31 @@ def main():
         pretrain_data = load_pretrain_data(pretrain_data_path)
         if pretrain_data:
             logger.info(f"从 {pretrain_data_path} 加载了预训练数据")
+        else:
+            logger.info("预训练数据不存在，自动调用数据生成器...")
+            try:
+                # 调用PySR数据生成器
+                generate_script_path = os.path.join(project_root, 'scripts', 'generate_pretrain_data_PySR.py')
+                if os.path.exists(generate_script_path):
+                    logger.info(f"执行数据生成脚本: {generate_script_path}")
+                    import subprocess
+                    result = subprocess.run([sys.executable, generate_script_path], 
+                                          capture_output=True, text=True, cwd=str(project_root))
+                    if result.returncode == 0:
+                        logger.info("数据生成完成，重新加载数据...")
+                        pretrain_data = load_pretrain_data(pretrain_data_path)
+                        if pretrain_data:
+                            logger.info(f"重新加载预训练数据成功，表达式数量: {len(pretrain_data)}")
+                        else:
+                            logger.error("数据生成后仍然无法加载数据")
+                    else:
+                        logger.error(f"数据生成失败: {result.stderr}")
+                else:
+                    logger.error(f"数据生成脚本不存在: {generate_script_path}")
+            except Exception as e:
+                logger.error(f"调用数据生成器时出错: {e}")
+                import traceback
+                traceback.print_exc()
         
         # 创建在线微调循环
         logger.info("创建在线微调循环...")

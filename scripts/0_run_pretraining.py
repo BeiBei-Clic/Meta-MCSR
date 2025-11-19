@@ -11,7 +11,8 @@ import sys
 import torch
 import numpy as np
 import logging
-from typing import Dict, Any, Optional
+import subprocess
+from typing import Dict, Any, Optional, Tuple, List
 from pathlib import Path
 
 # 添加项目路径
@@ -35,6 +36,174 @@ def setup_logging():
             logging.FileHandler('results/logs/pretrain.log')
         ]
     )
+
+
+def load_pretrain_data(pretrain_data_path: str = "data/pysr_datasets") -> Optional[Dict[str, Any]]:
+    """加载PySR格式的预训练数据"""
+    if not os.path.exists(pretrain_data_path):
+        print(f"警告：预训练数据路径 {pretrain_data_path} 不存在")
+        return None
+    
+    try:
+        # 如果是目录，读取所有txt文件
+        if os.path.isdir(pretrain_data_path):
+            pretrain_data = []
+            txt_files = sorted([f for f in os.listdir(pretrain_data_path) if f.endswith('.txt')])
+            
+            print(f"在目录 {pretrain_data_path} 中找到 {len(txt_files)} 个数据文件")
+            
+            if len(txt_files) == 0:
+                print("没有找到数据文件")
+                return None
+            
+            # 处理所有文件
+            count = 0
+            
+            for file_name in txt_files:
+                file_path = os.path.join(pretrain_data_path, file_name)
+                print(f"处理文件: {file_name}")
+                
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    lines = f.readlines()
+                
+                if len(lines) < 2:
+                    print(f"  文件 {file_name} 内容不足，跳过")
+                    continue
+                
+                # 解析第一行的表达式
+                first_line = lines[0].strip()
+                if first_line.startswith('表达式: '):
+                    current_expression = first_line.replace('表达式: ', '').strip()
+                    print(f"  找到表达式: {current_expression}")
+                else:
+                    print(f"  文件 {file_name} 第一行格式错误: {first_line[:50]}...")
+                    continue
+                
+                # 解析数据行
+                samples = []
+                for line in lines[1:]:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    
+                    try:
+                        # 解析 x1,x2,y 格式
+                        parts = line.split(',')
+                        if len(parts) >= 3:
+                            x1 = float(parts[0])
+                            x2 = float(parts[1])
+                            y = float(parts[2])
+                            
+                            samples.append({'x1': x1, 'x2': x2, 'y': y})
+                        else:
+                            print(f"    数据格式错误: {line}")
+                    except (ValueError, IndexError) as e:
+                        print(f"    解析数据失败: {line} (错误: {e})")
+                        continue
+                
+                if current_expression and samples:
+                    pretrain_data.append({
+                        'expression': current_expression,
+                        'samples': samples,
+                        'variables': ['x1', 'x2']  # 双变量表达式
+                    })
+                    print(f"  加载样本数量: {len(samples)}")
+                    count += 1
+                else:
+                    print(f"  文件 {file_name} 无有效数据")
+            
+            print(f"成功加载 {len(pretrain_data)} 个表达式数据")
+            
+            if len(pretrain_data) == 0:
+                print("没有加载到任何有效数据")
+                return None
+            
+            return pretrain_data
+        
+        # 如果是文件，保持原有逻辑（兼容性）
+        else:
+            return load_single_file_data(pretrain_data_path)
+            
+    except Exception as e:
+        print(f"加载预训练数据失败: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
+
+
+def load_single_file_data(file_path: str) -> Optional[Dict[str, Any]]:
+    """加载单个文件的预训练数据（原格式兼容性）"""
+    # 这里保持原有逻辑的简化版本
+    pretrain_data = []
+    try:
+        with open(file_path, 'r') as f:
+            lines = f.readlines()
+        
+        current_expression = None
+        samples = []
+        
+        for line in lines:
+            line = line.strip()
+            
+            if line.startswith('Expression: '):
+                if current_expression and samples:
+                    pretrain_data.append({
+                        'expression': current_expression,
+                        'samples': samples
+                    })
+                current_expression = line.replace('Expression: ', '').strip()
+                samples = []
+            elif line.startswith('Sample ') and 'X=' in line:
+                try:
+                    import re
+                    match = re.search(r'X=\[(.*?)\], y=(.*)', line)
+                    if match:
+                        x_value = float(match.group(1))
+                        y_value = float(match.group(2))
+                        samples.append({'X': x_value, 'y': y_value})
+                except (ValueError, IndexError):
+                    continue
+        
+        # 添加最后一个表达式
+        if current_expression and samples:
+            pretrain_data.append({
+                'expression': current_expression,
+                'samples': samples
+            })
+        
+        return pretrain_data
+    except Exception as e:
+        print(f"加载单个文件数据失败: {e}")
+        return None
+
+
+def convert_pysr_data_to_pretrain_format(pysr_data: List[Dict[str, Any]]) -> Tuple[List[str], List[Tuple[np.ndarray, np.ndarray]]]:
+    """将PySR格式数据转换为预训练格式"""
+    expressions = []
+    datasets = []
+    
+    for item in pysr_data:
+        expression = item['expression']
+        samples = item['samples']
+        
+        # 提取X和y数据
+        if len(samples) > 0:
+            if 'x1' in samples[0] and 'x2' in samples[0]:
+                # 双变量格式
+                X = np.array([[sample['x1'], sample['x2']] for sample in samples]).astype(np.float32)
+            elif 'X' in samples[0]:
+                # 单变量格式（兼容性）
+                X = np.array([[sample['X']] for sample in samples]).astype(np.float32)
+            else:
+                # 默认单变量
+                X = np.array([[sample.get('x1', 0)] for sample in samples]).astype(np.float32)
+            
+            y = np.array([sample['y'] for sample in samples]).astype(np.float32)
+            
+            expressions.append(expression)
+            datasets.append((X, y))
+    
+    return expressions, datasets
 
 
 def load_config(config_path: str = "config.yaml") -> Dict[str, Any]:
@@ -144,31 +313,61 @@ def main():
             device=device
         )
         
-        # 设置预训练数据路径
-        pretrain_data_path = "data/pretrain/progress_100000/datasets.txt"
+        # 优先尝试加载PySR格式的预训练数据
+        pysr_data_path = "data/pysr_datasets"
+        pysr_data = load_pretrain_data(pysr_data_path)
         
-        # 检查数据文件是否存在
-        if not os.path.exists(pretrain_data_path):
-            logger.warning(f"预训练数据文件不存在: {pretrain_data_path}")
-            logger.info("开始自动生成预训练数据...")
+        if pysr_data:
+            logger.info(f"使用PySR格式数据: {pysr_data_path}，共 {len(pysr_data)} 个表达式")
+            # 转换数据格式
+            expressions, datasets = convert_pysr_data_to_pretrain_format(pysr_data)
+            logger.info(f"转换后数据: {len(expressions)} 个表达式")
+            # 开始预训练，从转换的数据加载
+            training_history = pretrain_pipeline.fit(expressions=expressions, datasets=datasets)
+        else:
+            logger.warning("PySR格式数据不存在，使用原格式数据")
             
-            # 运行数据生成脚本
-            try:
-                from scripts.generate_pretrain_data import main as generate_data_main
-                generate_data_main()
-                logger.info("预训练数据生成完成")
+            # 设置预训练数据路径（原格式）
+            pretrain_data_path = "data/pretrain/progress_100000/datasets.txt"
+            
+            # 检查数据文件是否存在
+            if not os.path.exists(pretrain_data_path):
+                logger.warning(f"预训练数据文件不存在: {pretrain_data_path}")
+                logger.info("开始自动生成预训练数据...")
                 
-                # 再次检查数据文件是否存在
-                if not os.path.exists(pretrain_data_path):
-                    logger.error(f"数据生成后文件仍不存在: {pretrain_data_path}")
-                    raise FileNotFoundError(f"无法生成预训练数据文件: {pretrain_data_path}")
-            except Exception as e:
-                logger.error(f"自动生成数据失败: {e}")
-                raise FileNotFoundError(f"无法生成预训练数据: {e}")
-        
-        logger.info(f"使用预训练数据文件: {pretrain_data_path}")
-        # 开始预训练，从指定文件加载数据
-        training_history = pretrain_pipeline.fit(data_path=pretrain_data_path)
+                # 运行数据生成脚本
+                try:
+                    # 优先尝试PySR数据生成器
+                    pysr_generate_script_path = os.path.join(project_root, 'scripts', 'generate_pretrain_data_PySR.py')
+                    if os.path.exists(pysr_generate_script_path):
+                        logger.info(f"执行PySR数据生成器: {pysr_generate_script_path}")
+                        result = subprocess.run([sys.executable, pysr_generate_script_path], 
+                                              capture_output=True, text=True, cwd=str(project_root))
+                        if result.returncode == 0:
+                            logger.info("PySR数据生成完成")
+                            pysr_data = load_pretrain_data(pysr_data_path)
+                            if pysr_data:
+                                expressions, datasets = convert_pysr_data_to_pretrain_format(pysr_data)
+                                logger.info(f"转换后数据: {len(expressions)} 个表达式")
+                                training_history = pretrain_pipeline.fit(expressions=expressions, datasets=datasets)
+                            else:
+                                logger.error("PySR数据生成后仍无法加载数据")
+                                raise FileNotFoundError("PySR数据生成失败")
+                        else:
+                            logger.error(f"PySR数据生成失败: {result.stderr}")
+                            raise FileNotFoundError("PySR数据生成失败")
+                    else:
+                        # 回退到原来的数据生成器
+                        from scripts.generate_pretrain_data import main as generate_data_main
+                        generate_data_main()
+                        logger.info("原格式预训练数据生成完成")
+                except Exception as e:
+                    logger.error(f"自动生成数据失败: {e}")
+                    raise FileNotFoundError(f"无法生成预训练数据: {e}")
+            
+            logger.info(f"使用原格式预训练数据文件: {pretrain_data_path}")
+            # 开始预训练，从指定文件加载数据
+            training_history = pretrain_pipeline.fit(data_path=pretrain_data_path)
         
         # 保存最终结果
         pretrain_pipeline.save_pretrained()

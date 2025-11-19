@@ -55,8 +55,7 @@ class PySRDataGenerator:
             PhysicsFormula("电势", "电磁学", "k * q / r", ["k", "q", "r"], "点电荷电势", 2),
             PhysicsFormula("电容", "电磁学", "Q / V", ["Q", "V"], "电容定义", 1),
             PhysicsFormula("欧姆定律", "电磁学", "I * R", ["I", "R"], "欧姆定律", 1),
-            PhysicsFormula("功率", "电磁学", "V * I", ["V", "I"], "电功率", 1),
-            PhysicsFormula("电感感应", "电磁学", "L * 1", ["L"], "法拉第电磁感应定律", 3),
+            PhysicsFormula("电感感应", "电磁学", "L * di / dt", ["L", "di", "dt"], "法拉第电磁感应定律", 3),
             PhysicsFormula("洛伦兹力", "电磁学", "q * E + q * v", ["q", "E", "v"], "洛伦兹力公式", 4),
             
             # 热力学

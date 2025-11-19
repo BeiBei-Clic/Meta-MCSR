@@ -376,8 +376,7 @@ def main():
             # 开始预训练，从转换的数据加载
             training_history = pretrain_pipeline.fit(expressions=expressions, datasets=datasets)
         else:
-            logger.warning("PySR格式数据不存在，使用原格式数据")
-            
+            logger.warning("PySR格式数据不存在")
             # 运行数据生成脚本
             try:
                 # 优先尝试PySR数据生成器
@@ -402,9 +401,6 @@ def main():
                 logger.error(f"自动生成数据失败: {e}")
                 raise FileNotFoundError(f"无法生成预训练数据: {e}")
             
-            # 开始预训练，从指定文件加载数据
-            training_history = pretrain_pipeline.fit(data_path=pretrain_data_path)
-        
         # 保存最终结果
         pretrain_pipeline.save_pretrained()
         

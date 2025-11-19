@@ -465,7 +465,6 @@ class PretrainPipeline:
         self,
         expressions: Optional[List[str]] = None,
         datasets: Optional[List[Tuple[np.ndarray, np.ndarray]]] = None,
-        data_path: Optional[str] = None
     ) -> Dict[str, List[float]]:
         """
         训练模型
@@ -473,32 +472,16 @@ class PretrainPipeline:
         Args:
             expressions: 表达式列表
             datasets: 数据集列表
-            data_path: 数据路径
             
         Returns:
             训练历史
         """
-        # 加载数据
-        if expressions is None or datasets is None:
-            if not data_path or not os.path.exists(data_path):
-                raise FileNotFoundError(f"数据文件不存在: {data_path}")
-            
-            # 从txt文件加载数据
-            try:
-                from ..utils.data_loader import DataLoader
-                data_loader = DataLoader()
-                expressions, datasets = data_loader.load_from_pretrain_txt(data_path)
-                self.logger.info(f"从 {data_path} 成功加载 {len(expressions)} 个表达式")
-            except Exception as e:
-                self.logger.error(f"从txt文件加载数据失败: {e}")
-                raise
-        
         # 分割训练和验证集
         train_expr, val_expr = train_test_split(
-            expressions, test_size=0.1, random_state=42
+            expressions, test_size=0.2, random_state=42
         )
         train_data, val_data = train_test_split(
-            datasets, test_size=0.1, random_state=42
+            datasets, test_size=0.2, random_state=42
         )
         
         # 创建数据集

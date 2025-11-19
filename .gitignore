@@ -3,6 +3,8 @@ models_weights
 nd2py_package
 results
 files
+outputs
+
 
 # Python
 __pycache__/

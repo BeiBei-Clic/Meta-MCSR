@@ -76,86 +76,80 @@ def load_pretrain_data(pretrain_data_path: str = "data/pysr_datasets") -> Option
         return None
     
     try:
-        # 如果是目录，读取所有txt文件
-        if os.path.isdir(pretrain_data_path):
-            pretrain_data = []
-            txt_files = sorted([f for f in os.listdir(pretrain_data_path) if f.endswith('.txt')])
-            
-            print(f"在目录 {pretrain_data_path} 中找到 {len(txt_files)} 个数据文件")
-            
-            if len(txt_files) == 0:
-                print("没有找到数据文件，调用数据生成器...")
-                return None
-            
-            # 处理所有文件
-            count = 0
-            total_samples = 0
-            
-            for file_name in txt_files:
-                file_path = os.path.join(pretrain_data_path, file_name)
-                print(f"处理文件: {file_name}")
-                
-                with open(file_path, 'r', encoding='utf-8') as f:
-                    lines = f.readlines()
-                
-                if len(lines) < 2:
-                    print(f"  文件 {file_name} 内容不足，跳过")
-                    continue
-                
-                # 解析第一行的表达式
-                first_line = lines[0].strip()
-                if first_line.startswith('表达式: '):
-                    current_expression = first_line.replace('表达式: ', '').strip()
-                    print(f"  找到表达式: {current_expression}")
-                else:
-                    print(f"  文件 {file_name} 第一行格式错误: {first_line[:50]}...")
-                    continue
-                
-                # 解析数据行
-                samples = []
-                for line in lines[1:]:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    
-                    try:
-                        # 解析 x1,x2,y 格式
-                        parts = line.split(',')
-                        if len(parts) >= 3:
-                            x1 = float(parts[0])
-                            x2 = float(parts[1])
-                            y = float(parts[2])
-                            
-                            samples.append({'x1': x1, 'x2': x2, 'y': y})
-                        else:
-                            print(f"    数据格式错误: {line}")
-                    except (ValueError, IndexError) as e:
-                        print(f"    解析数据失败: {line} (错误: {e})")
-                        continue
-                
-                if current_expression and samples:
-                    pretrain_data.append({
-                        'expression': current_expression,
-                        'samples': samples,
-                        'variables': ['x1', 'x2']  # 双变量表达式
-                    })
-                    print(f"  加载样本数量: {len(samples)}")
-                    count += 1
-                    total_samples += len(samples)
-                else:
-                    print(f"  文件 {file_name} 无有效数据")
-            
-            print(f"成功加载 {len(pretrain_data)} 个表达式数据，总样本数: {total_samples}")
-            
-            if len(pretrain_data) == 0:
-                print("没有加载到任何有效数据，调用数据生成器...")
-                return None
-            
-            return pretrain_data
+        pretrain_data = []
+        txt_files = sorted([f for f in os.listdir(pretrain_data_path) if f.endswith('.txt')])
         
-        # 如果是文件，保持原有逻辑（兼容性）
-        else:
-            return load_single_file_data(pretrain_data_path)
+        print(f"在目录 {pretrain_data_path} 中找到 {len(txt_files)} 个数据文件")
+        
+        if len(txt_files) == 0:
+            print("没有找到数据文件，调用数据生成器...")
+            return None
+        
+        # 处理所有文件
+        count = 0
+        total_samples = 0
+        
+        for file_name in txt_files:
+            file_path = os.path.join(pretrain_data_path, file_name)
+            print(f"处理文件: {file_name}")
+            
+            with open(file_path, 'r', encoding='utf-8') as f:
+                lines = f.readlines()
+            
+            if len(lines) < 2:
+                print(f"  文件 {file_name} 内容不足，跳过")
+                continue
+            
+            # 解析第一行的表达式
+            first_line = lines[0].strip()
+            if first_line.startswith('表达式: '):
+                current_expression = first_line.replace('表达式: ', '').strip()
+                print(f"  找到表达式: {current_expression}")
+            else:
+                print(f"  文件 {file_name} 第一行格式错误: {first_line[:50]}...")
+                continue
+            
+            # 解析数据行
+            samples = []
+            for line in lines[1:]:
+                line = line.strip()
+                if not line:
+                    continue
+                
+                try:
+                    # 解析 x1,x2,y 格式
+                    parts = line.split(',')
+                    if len(parts) >= 3:
+                        x1 = float(parts[0])
+                        x2 = float(parts[1])
+                        y = float(parts[2])
+                        
+                        samples.append({'x1': x1, 'x2': x2, 'y': y})
+                    else:
+                        print(f"    数据格式错误: {line}")
+                except (ValueError, IndexError) as e:
+                    print(f"    解析数据失败: {line} (错误: {e})")
+                    continue
+            
+            if current_expression and samples:
+                pretrain_data.append({
+                    'expression': current_expression,
+                    'samples': samples,
+                    'variables': ['x1', 'x2']  # 双变量表达式
+                })
+                print(f"  加载样本数量: {len(samples)}")
+                count += 1
+                total_samples += len(samples)
+            else:
+                print(f"  文件 {file_name} 无有效数据")
+        
+        print(f"成功加载 {len(pretrain_data)} 个表达式数据，总样本数: {total_samples}")
+        
+        if len(pretrain_data) == 0:
+            print("没有加载到任何有效数据，调用数据生成器...")
+            return None
+        
+        return pretrain_data
             
     except Exception as e:
         print(f"加载预训练数据失败: {e}")
@@ -269,18 +263,11 @@ def main():
     
     print("=" * 60)
     print("在线微调循环 - 阶段一")
-    print("MCTS探索与真实解引导微调的集成算法")
     print("=" * 60)
     
     # 设置日志
     setup_logging()
     logger = logging.getLogger(__name__)
-    
-    logger.info("开始在线微调流程...")
-    logger.info("1. 加载配置和模型")
-    logger.info("2. 自动加载预训练数据（若不存在则自动生成）")
-    logger.info("3. 执行MCTS探索与微调")
-    logger.info("4. 保存最终结果")
     
     # 加载配置
     try:

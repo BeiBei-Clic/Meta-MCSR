@@ -550,13 +550,13 @@ class PretrainPipeline:
             # 更新学习率调度器
             self.scheduler.step(val_metrics['loss'])
 
-            # 保存最佳模型（静默保存，不在进度条显示）
+            # 保存最佳模型
             if val_metrics['loss'] < self.best_loss:
                 self.best_loss = val_metrics['loss']
                 self.save_pretrained()
                 self.logger.info(f"新的最佳模型已保存，验证损失: {self.best_loss:.4f}")
 
-            # 使用tqdm的set_postfix显示训练信息（去掉学习率和最佳模型，增加梯度范数）
+            # 使用tqdm的set_postfix显示训练信息
             grad_norm = train_metrics.get('grad_norm', 0.0)
             postfix_info = {
                 'Train Loss': f"{train_metrics['loss']:.4f}",

@@ -1,30 +1,41 @@
 """
 在线微调循环
 
-实现MCTS探索与真实解引导微调的集成算法。
-这是算法的核心部分，将MCTS探索与编码器微调结合。
+实现基于真实解引导的专家微调阶段，使用MCTS+三元组损失
+对编码器进行精细打磨。
 """
 
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
-from typing import Dict, List, Optional, Tuple, Any
-import os
-import json
-import logging
-import gc
-from tqdm import tqdm
+from typing import Dict, List, Optional, Tuple, Any, NamedTuple
 from collections import deque
+import os
+import pickle
+import copy
+from tqdm import tqdm
+import logging
+from sklearn.model_selection import train_test_split
 
-from ..core.mcts_engine import EnhancedMCTSEngine, EnhancedNode
-from ..core.reward_calculator import RewardCalculator
 from ..models.expression_encoder import ExpressionEncoder
 from ..models.data_encoder import DataEncoder
+from ..core.mcts_engine import MCTSEngine
+from ..core.reward_calculator import RewardCalculator
 
 
-class FinetuneLoop:
-    """在线微调循环，实现MCTS探索与真实解引导微调的集成"""
-    
+class HardNegativeSample(NamedTuple):
+    """难负样本三元组"""
+    anchor_expr: str  # 锚点（真实解）
+    negative_expr: str  # 难负样本
+    data_X: np.ndarray  # 数据特征
+    data_y: np.ndarray  # 数据标签
+    target_embedding: Optional[torch.Tensor] = None  # 目标数据嵌入（可选缓存）
+
+
+class OnlineFinetuneLoop:
+    """在线微调循环"""
+
     def __init__(
         self,
         expression_encoder: ExpressionEncoder,
@@ -32,602 +43,605 @@ class FinetuneLoop:
         config: Dict[str, Any],
         device: str = 'cpu'
     ):
+        """
+        初始化在线微调循环
+
+        Args:
+            expression_encoder: 表达式编码器
+            data_encoder: 数据编码器
+            config: 配置字典
+            device: 设备
+        """
         self.expression_encoder = expression_encoder
         self.data_encoder = data_encoder
         self.config = config
         self.device = device
-        
+
         # 将模型移动到设备
         self.expression_encoder.to(device)
         self.data_encoder.to(device)
-        
-        # 创建优化器（极低学习率）
-        self.optimizer = self._create_optimizer()
-        
+
         # 奖励计算器
         self.reward_calculator = RewardCalculator(
-            reward_weights=config.get('reward_weights', None)
+            reward_weights=config.get('reward_weights', {
+                'accuracy': 0.5,
+                'data_alignment': 0.3,
+                'structure_alignment': 0.2,
+            }),
+            temperature=0.07
         )
-        
-        # 内存管理
-        self.memory_management_enabled = config.get('memory_management', True)
-        self.gradient_checkpointing = config.get('gradient_checkpointing', False)
-        
+
         # MCTS引擎
         self.mcts_engine = self._create_mcts_engine()
-        
-        # 经验回放池
-        self.experience_buffer = deque(maxlen=config.get('buffer_size', 10000))
-        
+
+        # 难负样本池
+        self.hard_negative_pool = deque(maxlen=config.get('hard_negative_pool_size', 1000))
+        self.hard_negative_threshold = config.get('hard_negative_threshold', 0.8)
+
+        # 三元组损失
+        self.triplet_loss = nn.TripletMarginLoss(
+            margin=config.get('triplet_margin', 1.0),
+            p=2  # 欧氏距离
+        )
+        self.alignment_loss_weight = config.get('alignment_loss_weight', 0.5)
+
+        # 优化器
+        self.optimizer = self._create_optimizer()
+
+        # 学习率调度器
+        self.scheduler = self._create_scheduler()
+
         # 日志
         self.logger = self._setup_logging()
-        
+
         # 训练状态
         self.global_step = 0
         self.epoch = 0
-        self.best_performance = {
-            'r2': -np.inf,
-            'expression': None,
-            'epoch': -1
+        self.best_reward = float('-inf')
+
+        # 统计信息
+        self.statistics = {
+            'hard_negatives_found': 0,
+            'triplet_losses': [],
+            'alignment_losses': [],
+            'total_losses': [],
+            'mcts_rewards': [],
         }
-        
-        # 性能记录
-        self.performance_history = {
-            'r2_scores': [],
-            'best_expressions': [],
-            'finetune_losses': [],
-            'diversity_scores': [],
-            'composite_scores': []
-        }
-    
-    def _create_optimizer(self):
-        """创建优化器，使用极低学习率"""
-        param_groups = [
-            {'params': self.expression_encoder.parameters(), 'lr': self.config['learning_rate']},
-            {'params': self.data_encoder.parameters(), 'lr': self.config['learning_rate']}
-        ]
-        
-        optimizer = torch.optim.AdamW(
-            param_groups,
-            lr=self.config['learning_rate'],
-            betas=(0.9, 0.999),
-            eps=1e-8,
-            weight_decay=self.config.get('weight_decay', 1e-4)
-        )
-        
-        return optimizer
-    
-    def _create_mcts_engine(self) -> EnhancedMCTSEngine:
+
+    def _create_mcts_engine(self) -> MCTSEngine:
         """创建MCTS引擎"""
-        return EnhancedMCTSEngine(
+        return MCTSEngine(
             expression_encoder=self.expression_encoder,
             data_encoder=self.data_encoder,
-            max_depth=self.config.get('max_depth', 12),
-            max_iterations=self.config.get('max_iterations', 1000),
-            max_vars=self.config.get('max_variables', 5),
-            exploration_constant=self.config.get('exploration_constant', 1.4),
-            simulation_count=self.config.get('simulation_count', 10),
-            reward_weights=self.config.get('reward_weights', None),
-            device=self.device
+            reward_calculator=self.reward_calculator,
+            config=self.config.get('mcts', {}),
+            device=self.device,
+            freeze_encoders=False  # 在线微调阶段不冻结编码器
         )
-    
+
+    def _create_optimizer(self):
+        """创建优化器"""
+        learning_rate = float(self.config.get('learning_rate', 1e-6))  # 极低学习率
+
+        param_groups = [
+            {'params': self.expression_encoder.parameters(), 'lr': learning_rate},
+            {'params': self.data_encoder.parameters(), 'lr': learning_rate}
+        ]
+
+        if self.config.get('optimizer', {}).get('type', 'adamw') == 'adamw':
+            optimizer = torch.optim.AdamW(
+                param_groups,
+                lr=learning_rate,
+                betas=(0.9, 0.999),
+                eps=1e-8,
+                weight_decay=float(self.config.get('weight_decay', 1e-4))
+            )
+        else:
+            optimizer = torch.optim.Adam(
+                param_groups,
+                lr=learning_rate,
+                betas=(0.9, 0.999),
+                eps=1e-8,
+                weight_decay=float(self.config.get('weight_decay', 1e-4))
+            )
+
+        return optimizer
+
+    def _create_scheduler(self):
+        """创建学习率调度器"""
+        return torch.optim.lr_scheduler.ReduceLROnPlateau(
+            self.optimizer,
+            mode='max',  # 监控奖励，奖励越高越好
+            factor=0.5,
+            patience=5,
+            min_lr=1e-8
+        )
+
     def _setup_logging(self):
         """设置日志"""
-        logger = logging.getLogger('finetune_loop')
+        os.makedirs('results/logs', exist_ok=True)
+
+        logger = logging.getLogger('finetune')
         logger.setLevel(logging.INFO)
-        
-        if not logger.handlers:
-            handler = logging.StreamHandler()
-            formatter = logging.Formatter(
-                '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-            )
-            handler.setFormatter(formatter)
-            logger.addHandler(handler)
-            
-        return logger
-    
-    def fit(
-        self,
-        X: np.ndarray,
-        y: np.ndarray,
-        true_expression: str,
-        variables: Optional[List[str]] = None
-    ) -> Dict[str, Any]:
-        """
-        运行在线微调循环
-        
-        Args:
-            X: 输入数据
-            y: 目标值
-            true_expression: 真实表达式
-            variables: 变量列表
-            
-        Returns:
-            训练结果
-        """
-        self.logger.info(f"开始在线微调循环，真实表达式: {true_expression}")
-        
-        # 阶段0：初始化目标嵌入
-        target_expr_embedding = self.expression_encoder.encode(true_expression)
-        target_data_embedding = self.data_encoder.encode(X, y)
-        
-        self.logger.info("计算目标嵌入完成")
-        
-        # 检查并记录初始内存状态
-        if self.memory_management_enabled and torch.cuda.is_available():
-            memory_allocated = torch.cuda.memory_allocated() / 1024**3
-            total_memory = torch.cuda.get_device_properties(0).total_memory / 1024**3
-            free_memory = total_memory - memory_allocated
-            self.logger.info(f"初始GPU内存状态: {memory_allocated:.2f} GB / {total_memory:.2f} GB (可用: {free_memory:.2f} GB)")
-            
-            # 如果可用内存少于1GB，发出警告
-            if free_memory < 1.0:
-                self.logger.warning(f"可用GPU内存较少 ({free_memory:.2f} GB)，可能需要进一步优化")
-                # 立即清理一次
-                torch.cuda.empty_cache()
-                gc.collect()
-                
-        # 主循环训练
-        for epoch in range(self.config.get('mcts_epochs', 50)):
-            self.epoch = epoch
-            
-            self.logger.info(f"=== Epoch {epoch + 1}/{self.config['mcts_epochs']} ===")
-            
-            # 阶段一：MCTS探索与经验收集
-            best_expr = self._mcts_exploration_phase(
-                X, y, target_expr_embedding, target_data_embedding, true_expression
-            )
-            
-            # 阶段二：网络微调（基于真实解）
-            finetune_loss = self._finetune_phase(
-                X, y, true_expression, target_data_embedding.detach().cpu().numpy()  # 确保是numpy格式
-            )
-            
-            # 多样性评估：检查当前表达式与历史最佳表达式的差异
-            diversity_score = self._evaluate_diversity(best_expr)
-            
-            # 评估性能
-            performance = self._evaluate_performance(X, y, best_expr)
-            
-            # 综合评分：R2 + 多样性奖励 - 复杂度惩罚
-            complexity_penalty = len(str(best_expr)) * 0.001
-            composite_score = performance['r2'] + 0.1 * diversity_score - complexity_penalty
-            
-            # 记录性能
-            self.performance_history['r2_scores'].append(performance['r2'])
-            self.performance_history['best_expressions'].append(str(best_expr))
-            self.performance_history['finetune_losses'].append(finetune_loss)
-            self.performance_history['diversity_scores'].append(diversity_score)
-            self.performance_history['composite_scores'].append(composite_score)
-            
-            # 更新最佳性能（基于综合评分）
-            if composite_score > getattr(self.best_performance, 'composite_score', -np.inf):
-                self.best_performance.update({
-                    'r2': performance['r2'],
-                    'expression': str(best_expr),
-                    'epoch': epoch,
-                    'diversity_score': diversity_score,
-                    'composite_score': composite_score
-                })
-            
-            # 记录日志
-            self.logger.info(
-                f"Epoch {epoch + 1}: R2 = {performance['r2']:.4f}, "
-                f"Diversity = {diversity_score:.4f}, "
-                f"Composite = {composite_score:.4f}, "
-                f"Finetune Loss = {finetune_loss:.4f}, "
-                f"Best Expression = {best_expr}"
-            )
-            
-            # 内存管理
-            if self.memory_management_enabled and torch.cuda.is_available():
-                # 清理CUDA缓存
-                torch.cuda.empty_cache()
-                # 垃圾回收
-                gc.collect()
-                
-                # 记录内存使用
-                if (epoch + 1) % 5 == 0 or epoch == 0:
-                    memory_allocated = torch.cuda.memory_allocated() / 1024**3
-                    memory_reserved = torch.cuda.memory_reserved() / 1024**3
-                    total_memory = torch.cuda.get_device_properties(0).total_memory / 1024**3
-                    self.logger.info(
-                        f"GPU内存使用: {memory_allocated:.2f}GB / {total_memory:.2f}GB "
-                        f"(保留: {memory_reserved:.2f}GB, 空闲: {total_memory - memory_allocated:.2f}GB)"
-                    )
-            
-            # 定期保存
-            if (epoch + 1) % self.config.get('save_steps', 10) == 0:
-                self.save_checkpoint()
-            
-            # 更合理的提前停止条件
-            if len(self.performance_history['r2_scores']) >= 10:
-                recent_r2 = self.performance_history['r2_scores'][-10:]
-                r2_std = np.std(recent_r2)
-                r2_trend = np.mean(recent_r2[-5:]) - np.mean(recent_r2[:5])
-                
-                # 如果R2变化很小且标准差很小，可能已经收敛到局部最优
-                if r2_std < 0.001 and abs(r2_trend) < 0.001:
-                    self.logger.info(f"R2收敛过早 (标准差={r2_std:.6f})，可能存在过拟合，提前停止")
-                    break
-            
-            # 如果多样性过低，也可能存在过拟合
-            if hasattr(self, 'performance_history') and len(self.performance_history['diversity_scores']) >= 5:
-                recent_diversity = self.performance_history['diversity_scores'][-5:]
-                avg_diversity = np.mean(recent_diversity)
-                if avg_diversity < 0.01:
-                    self.logger.info(f"多样性过低 ({avg_diversity:.4f})，可能存在过拟合，提前停止")
-                    break
-        
-        self.logger.info("在线微调循环完成！")
-        return {
-            'best_performance': self.best_performance,
-            'performance_history': self.performance_history,
-            'final_expression': best_expr
-        }
-    
-    def _mcts_exploration_phase(
-        self,
-        X: np.ndarray,
-        y: np.ndarray,
-        target_expr_embedding: np.ndarray,
-        target_data_embedding: np.ndarray,
-        true_expression: str
-    ) -> Any:
-        """阶段一：MCTS探索与经验收集"""
-        
-        # 使用真实解引导的MCTS进行探索
-        best_expr = self.mcts_engine.fit(
-            X, y,
-            true_expression=true_expression,
-            target_data_embedding=target_data_embedding
+        logger.propagate = False
+        logger.handlers.clear()
+
+        handler = logging.FileHandler('results/logs/finetune.log')
+        formatter = logging.Formatter(
+            '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
         )
-        
-        # 收集经验到回放池
-        mcts_experiences = self.mcts_engine.get_experience_buffer()
-        for experience in mcts_experiences:
-            experience['epoch'] = self.epoch
-            experience['target_expr_embedding'] = target_expr_embedding
-            experience['target_data_embedding'] = target_data_embedding
-            self.experience_buffer.append(experience)
-        
-        # 清理MCTS经验池
-        self.mcts_engine.clear_experience_buffer()
-        
-        return best_expr
-    
-    def _finetune_phase(
+        handler.setFormatter(formatter)
+        logger.addHandler(handler)
+
+        return logger
+
+    def finetune(
         self,
+        benchmark_tasks: List[Tuple[str, np.ndarray, np.ndarray]],
+        mcts_epochs: int = 50,
+        eval_steps: int = 10,
+        save_steps: int = 10,
+        output_dir: str = "models_weights/finetuned/",
+        verbose: bool = True
+    ) -> Dict[str, List[float]]:
+        """
+        执行在线微调
+
+        Args:
+            benchmark_tasks: 基准任务列表，每个元素为 (真实表达式, X, y)
+            mcts_epochs: MCTS微调轮数
+            eval_steps: 评估步数
+            save_steps: 保存步数
+            output_dir: 输出目录
+            verbose: 是否打印详细信息
+
+        Returns:
+            训练历史
+        """
+        self.logger.info(f"开始在线微调，共{len(benchmark_tasks)}个基准任务")
+
+        # 分割训练和验证任务
+        train_tasks, val_tasks = train_test_split(
+            benchmark_tasks,
+            test_size=0.2,
+            random_state=42
+        )
+
+        # 主微调循环
+        train_history = {
+            'triplet_loss': [],
+            'alignment_loss': [],
+            'total_loss': [],
+            'mcts_reward': []
+        }
+
+        for epoch in range(mcts_epochs):
+            self.epoch = epoch
+
+            # 为每个基准任务执行MCTS+微调
+            epoch_metrics = {
+                'triplet_loss': 0.0,
+                'alignment_loss': 0.0,
+                'total_loss': 0.0,
+                'mcts_reward': 0.0,
+                'count': 0
+            }
+
+            # 随机打乱任务顺序
+            tasks_order = np.random.permutation(len(train_tasks))
+
+            pbar = tqdm(tasks_order, desc=f"Epoch {epoch+1}/{mcts_epochs}", leave=False) if verbose else tasks_order
+
+            for task_idx in pbar:
+                # 获取任务
+                true_expr, X, y = train_tasks[task_idx]
+
+                # 执行MCTS探索
+                best_expr, mcts_reward, _ = self.mcts_engine.search(
+                    task_data=(X, y),
+                    target_expression=true_expr,
+                    verbose=False
+                )
+
+                # 检查是否为难负样本
+                self._check_and_add_hard_negative(
+                    true_expr, best_expr, X, y, true_expr
+                )
+
+                # 计算微调损失
+                triplet_loss, alignment_loss = self._compute_finetune_loss(
+                    true_expr, best_expr, X, y
+                )
+
+                # 反向传播
+                total_loss = triplet_loss + self.alignment_loss_weight * alignment_loss
+
+                self.optimizer.zero_grad()
+                total_loss.backward()
+
+                # 梯度裁剪
+                torch.nn.utils.clip_grad_norm_(
+                    list(self.expression_encoder.parameters()) +
+                    list(self.data_encoder.parameters()),
+                    max_norm=1.0
+                )
+
+                self.optimizer.step()
+
+                # 记录指标
+                epoch_metrics['triplet_loss'] += triplet_loss.item()
+                epoch_metrics['alignment_loss'] += alignment_loss.item()
+                epoch_metrics['total_loss'] += total_loss.item()
+                epoch_metrics['mcts_reward'] += mcts_reward
+                epoch_metrics['count'] += 1
+
+                # 更新进度条
+                if verbose:
+                    pbar.set_postfix({
+                        'Triplet Loss': f"{triplet_loss.item():.4f}",
+                        'Align Loss': f"{alignment_loss.item():.4f}",
+                        'MCTS Reward': f"{mcts_reward:.4f}",
+                        'Hard Neg Pool': f"{len(self.hard_negative_pool)}"
+                    })
+
+            # 计算epoch平均指标
+            if epoch_metrics['count'] > 0:
+                for key in epoch_metrics:
+                    if key != 'count':
+                        epoch_metrics[key] /= epoch_metrics['count']
+
+                train_history['triplet_loss'].append(epoch_metrics['triplet_loss'])
+                train_history['alignment_loss'].append(epoch_metrics['alignment_loss'])
+                train_history['total_loss'].append(epoch_metrics['total_loss'])
+                train_history['mcts_reward'].append(epoch_metrics['mcts_reward'])
+
+            # 验证
+            if (epoch + 1) % eval_steps == 0:
+                val_metrics = self._validate(val_tasks)
+
+                # 更新学习率调度器
+                self.scheduler.step(val_metrics['reward'])
+
+                # 保存最佳模型
+                if val_metrics['reward'] > self.best_reward:
+                    self.best_reward = val_metrics['reward']
+                    self.save_pretrained(output_dir)
+                    self.logger.info(f"新的最佳模型已保存，验证奖励: {self.best_reward:.4f}")
+
+                if verbose:
+                    print(f"\nEpoch {epoch+1} 验证结果:")
+                    print(f"  验证奖励: {val_metrics['reward']:.4f}")
+                    print(f"  难负样本池大小: {len(self.hard_negative_pool)}")
+                    print(f"  当前学习率: {self.optimizer.param_groups[0]['lr']:.2e}\n")
+
+                self.logger.info(
+                    f"Epoch {epoch+1}: Val Reward = {val_metrics['reward']:.4f}, "
+                    f"Hard Neg Pool = {len(self.hard_negative_pool)}"
+                )
+
+            # 定期保存
+            if (epoch + 1) % save_steps == 0:
+                self.save_pretrained(os.path.join(output_dir, f"epoch_{epoch+1}"))
+
+            # 更新统计
+            self.statistics['hard_negatives_found'] += 0  # 实际计数在_check_and_add_hard_negative中
+            self.global_step += 1
+
+        pbar.close() if verbose else None
+
+        self.logger.info("在线微调完成！")
+        self.logger.info(f"总共发现 {self.statistics['hard_negatives_found']} 个难负样本")
+
+        return train_history
+
+    def _check_and_add_hard_negative(
+        self,
+        true_expr: str,
+        candidate_expr: str,
         X: np.ndarray,
         y: np.ndarray,
-        true_expression: str,
-        target_data_embedding: np.ndarray
-    ) -> float:
-        """阶段二：网络微调（内存优化版本）"""
+        target_expr: str
+    ):
+        """检查候选表达式是否为难负样本，如果是则加入样本池"""
+        try:
+            # 计算嵌入
+            true_embedding = self.expression_encoder.encode(true_expr, training=False)
+            candidate_embedding = self.expression_encoder.encode(candidate_expr, training=False)
+
+            # 计算结构相似度
+            true_tensor = true_embedding.unsqueeze(0)
+            candidate_tensor = candidate_embedding.unsqueeze(0)
+            structure_sim = F.cosine_similarity(true_tensor, candidate_tensor).item()
+
+            # 如果结构相似度很高
+            if structure_sim >= self.hard_negative_threshold:
+                # 计算准确度差异
+                true_r2 = self._evaluate_r2(true_expr, X, y)
+                candidate_r2 = self._evaluate_r2(candidate_expr, X, y)
+
+                # 如果真实解的准确度远高于候选表达式
+                if true_r2 > candidate_r2 + 0.1:  # 至少10%的准确度差异
+                    # 添加到难负样本池
+                    sample = HardNegativeSample(
+                        anchor_expr=true_expr,
+                        negative_expr=candidate_expr,
+                        data_X=X,
+                        data_y=y
+                    )
+
+                    self.hard_negative_pool.append(sample)
+                    self.statistics['hard_negatives_found'] += 1
+
+        except Exception as e:
+            self.logger.warning(f"检查难负样本时出错: {e}")
+
+    def _evaluate_r2(self, expression: str, X: np.ndarray, y: np.ndarray) -> float:
+        """评估表达式的R²分数"""
+        try:
+            y_pred = self._safe_eval_expression(expression, X)
+
+            ss_res = np.sum((y - y_pred) ** 2)
+            ss_tot = np.sum((y - np.mean(y)) ** 2)
+
+            if ss_tot == 0:
+                return 0.0 if np.allclose(y_pred, y) else -np.inf
+
+            return 1 - (ss_res / ss_tot)
+
+        except Exception:
+            return -np.inf
+
+    def _safe_eval_expression(self, expression: str, X: np.ndarray) -> np.ndarray:
+        """安全地求值表达式"""
+        n_vars = X.shape[1]
+
+        var_dict = {}
+        for i in range(n_vars):
+            var_dict[f'x{i + 1}'] = X[:, i]
+
+        var_dict.update({
+            'sin': np.sin,
+            'cos': np.cos,
+            'tan': np.tan,
+            'exp': np.exp,
+            'log': np.log,
+            'sqrt': np.sqrt,
+            'abs': np.abs,
+        })
+
+        expr_str = expression.replace('^', '**')
+        safe_dict = {"__builtins__": {}}
+
+        return eval(expr_str, safe_dict, var_dict)
+
+    def _compute_finetune_loss(
+        self,
+        true_expr: str,
+        best_expr: str,
+        X: np.ndarray,
+        y: np.ndarray
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        计算微调损失（三元组损失 + 对齐损失）
+
+        Returns:
+            (triplet_loss, alignment_loss)
+        """
+        # 确保模型在训练模式
+        self.expression_encoder.train()
+        self.data_encoder.train()
+
+        # 计算嵌入
+        true_embedding = self.expression_encoder.encode(true_expr, training=True)
+        negative_embedding = self.expression_encoder.encode(best_expr, training=True)
+
+        # 计算数据嵌入
+        X_tensor = torch.FloatTensor(X).to(self.device)
+        y_tensor = torch.FloatTensor(y).to(self.device)
+        data_embedding = self.data_encoder.encode(X_tensor, y_tensor)
+
+        # 真正的正样本是自己（用于三元组损失的公式）
+        positive_embedding = true_embedding
+
+        # 计算三元组损失
+        # 目标：d(anchor, positive) - d(anchor, negative) + margin > 0
+        triplet_loss = self.triplet_loss(
+            anchor=true_embedding,
+            positive=positive_embedding,
+            negative=negative_embedding
+        )
+
+        # 计算对齐损失：拉近真实解与数据的嵌入
+        cosine_sim = F.cosine_similarity(
+            true_embedding.unsqueeze(0),
+            data_embedding.unsqueeze(0)
+        )
+        alignment_loss = 1 - cosine_sim  # 1 - cosine_similarity
+
+        return triplet_loss, alignment_loss
+
+    def _compute_batch_finetune_loss(self, batch_samples: List[HardNegativeSample]) -> Tuple[torch.Tensor, torch.Tensor]:
+        """计算批次级别的微调损失"""
+        if not batch_samples:
+            return torch.tensor(0.0, device=self.device), torch.tensor(0.0, device=self.device)
+
+        total_triplet_loss = 0.0
+        total_alignment_loss = 0.0
+
+        for sample in batch_samples:
+            triplet_loss, alignment_loss = self._compute_finetune_loss(
+                sample.anchor_expr,
+                sample.negative_expr,
+                sample.data_X,
+                sample.data_y
+            )
+
+            total_triplet_loss += triplet_loss
+            total_alignment_loss += alignment_loss
+
+        # 计算平均损失
+        avg_triplet_loss = total_triplet_loss / len(batch_samples)
+        avg_alignment_loss = total_alignment_loss / len(batch_samples)
+
+        return avg_triplet_loss, avg_alignment_loss
+
+    def _validate(self, val_tasks: List[Tuple[str, np.ndarray, np.ndarray]]) -> Dict[str, float]:
+        """验证模型性能"""
+        self.expression_encoder.eval()
+        self.data_encoder.eval()
+
+        total_reward = 0.0
+        total_count = 0
+
+        with torch.no_grad():
+            for true_expr, X, y in val_tasks:
+                # 执行MCTS搜索
+                best_expr, mcts_reward, _ = self.mcts_engine.search(
+                    task_data=(X, y),
+                    target_expression=true_expr,
+                    verbose=False
+                )
+
+                total_reward += mcts_reward
+                total_count += 1
+
+        avg_reward = total_reward / max(1, total_count)
+
+        return {'reward': avg_reward}
+
+    def train_with_hard_negatives(
+        self,
+        batch_size: int = 8,
+        epochs: int = 10
+    ) -> Dict[str, float]:
+        """使用难负样本池训练模型"""
+        if len(self.hard_negative_pool) == 0:
+            self.logger.warning("难负样本池为空，跳过训练")
+            return {'triplet_loss': 0.0, 'alignment_loss': 0.0, 'total_loss': 0.0}
+
+        self.logger.info(f"使用{len(self.hard_negative_pool)}个难负样本进行训练")
 
         self.expression_encoder.train()
         self.data_encoder.train()
 
-        self.optimizer.zero_grad()
+        total_triplet_loss = 0.0
+        total_alignment_loss = 0.0
 
-        # 使用with torch.no_grad()来避免额外的梯度计算
-        with torch.no_grad():
-            # 计算真实解和数据集的嵌入
-            true_expr_embedding = self.expression_encoder.encode(true_expression)
-            data_embedding = target_data_embedding
-
-            # 确保数据在正确的设备上，并且是张量格式
-            if isinstance(true_expr_embedding, np.ndarray):
-                true_expr_embedding = torch.FloatTensor(true_expr_embedding)
-
-            if isinstance(data_embedding, np.ndarray):
-                data_embedding = torch.FloatTensor(data_embedding)
-
-            # 将张量移动到设备
-            expr_tensor = true_expr_embedding.to(self.device)
-            data_tensor = data_embedding.to(self.device)
-
-            # 计算余弦相似度
-            cosine_similarity = F.cosine_similarity(expr_tensor.unsqueeze(0), data_tensor.unsqueeze(0))
-
-            # 减少噪声生成的内存使用
-            noise_factor = 0.1 * (1.0 - self.epoch / self.config['mcts_epochs'])  # 随训练进度减少噪声
-            
-            # 原地操作减少内存分配
-            expr_tensor.add_(torch.randn_like(expr_tensor) * noise_factor)
-            data_tensor.add_(torch.randn_like(data_tensor) * noise_factor)
-
-            # 重新计算带噪声的余弦相似度
-            noisy_cosine = F.cosine_similarity(expr_tensor.unsqueeze(0), data_tensor.unsqueeze(0))
-
-        # 分离的损失计算
-        finetune_loss = 1 - noisy_cosine.detach()
-
-        # 内存优化的正则化计算
-        if self.epoch % 5 == 0:  # 每5个epoch计算一次正则化损失
-            # 添加L2正则化
-            l2_reg = 0.01
-            reg_loss = 0.0
-            for param in list(self.expression_encoder.parameters()) + list(self.data_encoder.parameters()):
-                reg_loss += torch.norm(param, p=2)
-            finetune_loss += l2_reg * reg_loss
-
-            # 添加熵正则化鼓励多样性
-            entropy_reg = -0.001 * torch.mean(cosine_similarity**2)
-            finetune_loss += entropy_reg
-
-        # 反向传播
-        finetune_loss.backward(retain_graph=False)  # 避免保留计算图
-
-        # 更严格的梯度裁剪
-        torch.nn.utils.clip_grad_norm_(
-            list(self.expression_encoder.parameters()) + list(self.data_encoder.parameters()),
-            max_norm=0.5
-        )
-
-        # 更新权重
-        self.optimizer.step()
-
-        # 立即清理临时变量
-        if self.memory_management_enabled and torch.cuda.is_available():
-            del expr_tensor, data_tensor, cosine_similarity, noisy_cosine
-            if 'reg_loss' in locals():
-                del reg_loss
-            if 'entropy_reg' in locals():
-                del entropy_reg
-        
-        return finetune_loss.item()
-    
-    def _evaluate_performance(
-        self,
-        X: np.ndarray,
-        y: np.ndarray,
-        expression: Any
-    ) -> Dict[str, float]:
-        """评估当前表达式的性能"""
-        try:
-            # 使用MCTS引擎的预测功能
-            y_pred = self.mcts_engine.predict(X)
-            
-            # 计算R2分数
-            from nd2py.utils import R2_score, RMSE_score
-            r2 = R2_score(y, y_pred)
-            rmse = RMSE_score(y, y_pred)
-            
-            return {
-                'r2': r2,
-                'rmse': rmse,
-                'expression': expression
-            }
-            
-        except Exception as e:
-            self.logger.warning(f"性能评估时出错: {e}")
-            return {
-                'r2': -np.inf,
-                'rmse': np.inf,
-                'expression': expression
-            }
-    
-    def _evaluate_diversity(self, expression: Any) -> float:
-        """评估当前表达式与历史最佳表达式之间的多样性"""
-        try:
-            current_expr_str = str(expression)
-            
-            # 与历史表达式比较
-            diversity_scores = []
-            for prev_expr in self.performance_history['best_expressions']:
-                if prev_expr and prev_expr != current_expr_str:
-                    # 简单的字符串差异度量
-                    current_len = len(current_expr_str)
-                    prev_len = len(prev_expr)
-                    len_diff = abs(current_len - prev_len)
-                    
-                    # 字符级别的差异
-                    common_chars = set(current_expr_str) & set(prev_expr)
-                    char_diversity = (len(set(current_expr_str) | set(prev_expr)) - len(common_chars)) / max(current_len, prev_len)
-                    
-                    diversity_scores.append(char_diversity)
-            
-            # 返回平均多样性分数
-            return np.mean(diversity_scores) if diversity_scores else 1.0
-            
-        except Exception as e:
-            self.logger.warning(f"多样性评估时出错: {e}")
-            return 0.0
-    
-    def predict(self, X: np.ndarray) -> np.ndarray:
-        """使用训练好的模型进行预测"""
-        return self.mcts_engine.predict(X)
-    
-    def get_best_expression(self) -> Any:
-        """获取最佳表达式"""
-        return self.best_performance.get('expression')
-    
-    def get_performance_history(self) -> Dict[str, List]:
-        """获取性能历史"""
-        return self.performance_history
-    
-    def analyze_experience_buffer(self) -> Dict[str, Any]:
-        """分析经验回放池"""
-        if not self.experience_buffer:
-            return {}
-        
-        experiences = list(self.experience_buffer)
-        
-        # 统计信息
-        r2_scores = [exp.get('r2', 0) for exp in experiences]
-        rewards = [exp.get('reward', 0) for exp in experiences]
-        expressions = [exp.get('expression') for exp in experiences]
-        
-        analysis = {
-            'total_experiences': len(experiences),
-            'r2_stats': {
-                'mean': np.mean(r2_scores),
-                'std': np.std(r2_scores),
-                'min': np.min(r2_scores),
-                'max': np.max(r2_scores),
-                'median': np.median(r2_scores)
-            },
-            'reward_stats': {
-                'mean': np.mean(rewards),
-                'std': np.std(rewards),
-                'min': np.min(rewards),
-                'max': np.max(rewards),
-                'median': np.median(rewards)
-            },
-            'best_expressions': sorted(
-                [(str(exp.get('expression', '')), exp.get('r2', -np.inf)) 
-                 for exp in experiences],
-                key=lambda x: x[1],
-                reverse=True
-            )[:10]
-        }
-        
-        return analysis
-    
-    def save_checkpoint(self, checkpoint_path: Optional[str] = None):
-        """保存检查点"""
-        if checkpoint_path is None:
-            checkpoint_path = os.path.join(
-                self.config.get('output_dir', 'models_weights/finetuned/'),
-                f'checkpoint_epoch_{self.epoch}'
+        # 随机采样训练
+        for epoch in range(epochs):
+            # 随机采样一个批次
+            samples = np.random.choice(
+                list(self.hard_negative_pool),
+                size=min(batch_size, len(self.hard_negative_pool)),
+                replace=False
             )
-        
-        os.makedirs(checkpoint_path, exist_ok=True)
-        
-        # 保存模型权重
-        torch.save({
-            'expression_encoder_state_dict': self.expression_encoder.state_dict(),
-            'data_encoder_state_dict': self.data_encoder.state_dict(),
-            'optimizer_state_dict': self.optimizer.state_dict(),
-            'epoch': self.epoch,
-            'global_step': self.global_step,
-            'best_performance': self.best_performance,
-            'performance_history': self.performance_history,
-            'config': self.config
-        }, os.path.join(checkpoint_path, 'finetune_checkpoint.pt'))
-        
-        # 保存经验回放池
-        experience_data = {
-            'buffer': list(self.experience_buffer),
-            'analysis': self.analyze_experience_buffer()
-        }
-        
-        import pickle
-        with open(os.path.join(checkpoint_path, 'experience_buffer.pkl'), 'wb') as f:
-            pickle.dump(experience_data, f)
-        
-        # 保存配置
-        config_path = os.path.join(checkpoint_path, 'config.json')
-        with open(config_path, 'w') as f:
-            json.dump(self.config, f, indent=2)
-        
-        self.logger.info(f"检查点已保存到 {checkpoint_path}")
-    
-    def load_checkpoint(self, checkpoint_path: str):
-        """加载检查点"""
-        # 加载模型权重
-        checkpoint = torch.load(
-            os.path.join(checkpoint_path, 'finetune_checkpoint.pt'),
-            map_location=self.device
+
+            # 计算损失
+            triplet_loss, alignment_loss = self._compute_batch_finetune_loss(list(samples))
+
+            # 反向传播
+            total_loss = triplet_loss + self.alignment_loss_weight * alignment_loss
+
+            self.optimizer.zero_grad()
+            total_loss.backward()
+
+            torch.nn.utils.clip_grad_norm_(
+                list(self.expression_encoder.parameters()) +
+                list(self.data_encoder.parameters()),
+                max_norm=1.0
+            )
+
+            self.optimizer.step()
+
+            total_triplet_loss += triplet_loss.item()
+            total_alignment_loss += alignment_loss.item()
+
+        avg_triplet_loss = total_triplet_loss / epochs
+        avg_alignment_loss = total_alignment_loss / epochs
+
+        self.logger.info(
+            f"难负样本训练完成: Triplet Loss = {avg_triplet_loss:.4f}, "
+            f"Alignment Loss = {avg_alignment_loss:.4f}"
         )
-        
-        self.expression_encoder.load_state_dict(checkpoint['expression_encoder_state_dict'])
-        self.data_encoder.load_state_dict(checkpoint['data_encoder_state_dict'])
-        self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-        
-        # 加载训练状态
-        self.epoch = checkpoint['epoch']
-        self.global_step = checkpoint['global_step']
-        self.best_performance = checkpoint['best_performance']
-        self.performance_history = checkpoint['performance_history']
-        
-        # 加载经验回放池
-        try:
-            import pickle
-            with open(os.path.join(checkpoint_path, 'experience_buffer.pkl'), 'rb') as f:
-                experience_data = pickle.load(f)
-                self.experience_buffer = deque(
-                    experience_data['buffer'],
-                    maxlen=self.config.get('buffer_size', 10000)
-                )
-        except:
-            self.logger.warning("无法加载经验回放池")
-        
-        self.logger.info(f"检查点已从 {checkpoint_path} 加载")
-    
-    def save_final_model(self, save_path: str):
-        """保存最终模型"""
-        os.makedirs(save_path, exist_ok=True)
-        
-        # 保存预训练好的编码器
-        expr_path = os.path.join(save_path, 'final_expression_encoder')
-        data_path = os.path.join(save_path, 'final_data_encoder')
-        
-        self.expression_encoder.save_pretrained(expr_path)
-        self.data_encoder.save_pretrained(data_path)
-        
-        # 保存最佳性能
-        final_results = {
-            'best_performance': self.best_performance,
-            'performance_history': self.performance_history,
-            'final_expression': str(self.get_best_expression()),
-            'experience_analysis': self.analyze_experience_buffer()
-        }
-        
-        with open(os.path.join(save_path, 'final_results.json'), 'w') as f:
-            json.dump(final_results, f, indent=2, default=str)
-        
-        # 保存MCTS引擎
-        import pickle
-        with open(os.path.join(save_path, 'mcts_engine.pkl'), 'wb') as f:
-            pickle.dump(self.mcts_engine, f)
-        
-        self.logger.info(f"最终模型已保存到 {save_path}")
-    
-    def reset(self):
-        """重置训练状态"""
-        self.global_step = 0
-        self.epoch = 0
-        self.best_performance = {
-            'r2': -np.inf,
-            'expression': None,
-            'epoch': -1
-        }
-        self.performance_history = {
-            'r2_scores': [],
-            'best_expressions': [],
-            'finetune_losses': [],
-            'diversity_scores': [],
-            'composite_scores': []
-        }
-        self.experience_buffer.clear()
-        self.reward_calculator.reset_history()
-        
-        self.logger.info("训练状态已重置")
-    
-    def check_memory_status(self) -> Dict[str, float]:
-        """检查GPU内存状态"""
-        if not torch.cuda.is_available():
-            return {'cuda_available': False}
-        
-        memory_allocated = torch.cuda.memory_allocated() / 1024**3
-        memory_reserved = torch.cuda.memory_reserved() / 1024**3
-        total_memory = torch.cuda.get_device_properties(0).total_memory / 1024**3
-        free_memory = total_memory - memory_allocated
-        
+
         return {
-            'cuda_available': True,
-            'memory_allocated_gb': memory_allocated,
-            'memory_reserved_gb': memory_reserved,
-            'total_memory_gb': total_memory,
-            'free_memory_gb': free_memory,
-            'memory_usage_percent': (memory_allocated / total_memory) * 100
+            'triplet_loss': avg_triplet_loss,
+            'alignment_loss': avg_alignment_loss,
+            'total_loss': avg_triplet_loss + self.alignment_loss_weight * avg_alignment_loss
         }
-    
-    def clear_memory(self):
-        """清理GPU内存"""
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-            gc.collect()
-            self.logger.info("GPU内存已清理")
+
+    def save_pretrained(self, save_path: str):
+        """保存微调后的模型"""
+        os.makedirs(save_path, exist_ok=True)
+
+        # 保存表达式编码器
+        expr_path = os.path.join(save_path, 'expression_encoder')
+        self.expression_encoder.save_pretrained(expr_path)
+
+        # 保存数据编码器
+        data_path = os.path.join(save_path, 'data_encoder')
+        self.data_encoder.save_pretrained(data_path)
+
+        # 保存难负样本池
+        hard_neg_path = os.path.join(save_path, 'hard_negative_pool.pkl')
+        with open(hard_neg_path, 'wb') as f:
+            pickle.dump(list(self.hard_negative_pool), f)
+
+        # 保存训练配置
+        config_path = os.path.join(save_path, 'finetune_config.json')
+        with open(config_path, 'w') as f:
+            import json
+            json.dump({
+                'best_reward': self.best_reward,
+                'global_step': self.global_step,
+                'epoch': self.epoch,
+                'statistics': self.statistics
+            }, f, indent=2)
+
+        self.logger.info(f"微调模型已保存到 {save_path}")
+
+    def load_pretrained(self, load_path: str):
+        """加载微调后的模型"""
+        # 加载表达式编码器
+        expr_path = os.path.join(load_path, 'expression_encoder')
+        if os.path.exists(expr_path):
+            self.expression_encoder = ExpressionEncoder.from_pretrained(expr_path)
+            self.expression_encoder.to(self.device)
+
+        # 加载数据编码器
+        data_path = os.path.join(load_path, 'data_encoder')
+        if os.path.exists(data_path):
+            self.data_encoder = DataEncoder.from_pretrained(data_path)
+            self.data_encoder.to(self.device)
+
+        # 加载难负样本池
+        hard_neg_path = os.path.join(load_path, 'hard_negative_pool.pkl')
+        if os.path.exists(hard_neg_path):
+            with open(hard_neg_path, 'rb') as f:
+                self.hard_negative_pool = deque(
+                    pickle.load(f),
+                    maxlen=self.config.get('hard_negative_pool_size', 1000)
+                )
+
+        # 加载训练状态
+        config_path = os.path.join(load_path, 'finetune_config.json')
+        if os.path.exists(config_path):
+            with open(config_path, 'r') as f:
+                import json
+                config = json.load(f)
+                self.best_reward = config.get('best_reward', float('-inf'))
+                self.global_step = config.get('global_step', 0)
+                self.epoch = config.get('epoch', 0)
+                self.statistics = config.get('statistics', {})
+
+        self.logger.info(f"微调模型已从 {load_path} 加载")
+
+    def get_statistics(self) -> Dict[str, Any]:
+        """获取统计信息"""
+        return {
+            'hard_negative_pool_size': len(self.hard_negative_pool),
+            'hard_negatives_found': self.statistics['hard_negatives_found'],
+            'best_reward': self.best_reward,
+            'global_step': self.global_step,
+            'epoch': self.epoch
+        }

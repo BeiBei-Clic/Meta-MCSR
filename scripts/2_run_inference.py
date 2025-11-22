@@ -23,8 +23,8 @@ sys.path.insert(0, str(project_root))
 # 导入项目模块
 from symbolic_regression.models.expression_encoder import ExpressionEncoder
 from symbolic_regression.models.data_encoder import DataEncoder
-from symbolic_regression.core.mcts_engine import EnhancedMCTSEngine
-from symbolic_regression.training.finetune_loop import FinetuneLoop
+from symbolic_regression.core.mcts_engine import MCTSEngine
+from symbolic_regression.core.reward_calculator import RewardCalculator
 from symbolic_regression.utils.data_loader import DataLoader
 
 

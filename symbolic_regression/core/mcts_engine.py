@@ -1,515 +1,708 @@
 """
-增强的MCTS引擎
+MCTS引擎
 
-集成表达式编码器和数据编码器的功能，使用三维复合奖励进行探索。
-基于原有的MCTS实现，添加了结构引导和数据对齐功能。
+实现蒙特卡洛树搜索，用于在语义空间中高效探索表达式结构。
+支持冻结编码器推理和在线微调两种模式。
 """
 
-import numpy as np
-import random
-import copy
 import torch
 import torch.nn.functional as F
-import sys
-import os
-from typing import List, Dict, Optional, Tuple, Any
-from collections import deque
+import numpy as np
+from typing import Dict, List, Optional, Tuple, Any, Set
+import math
+import random
+from collections import defaultdict
+import copy
+import re
 
-# 添加nd2py包路径
-sys.path.append(os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), '..', '..'))
-import nd2py as nd
-from nd2py.utils import R2_score, RMSE_score
+from .reward_calculator import RewardCalculator
 
 
-class EnhancedNode:
-    """增强的MCTS节点，支持嵌入向量和复合奖励"""
-    
-    def __init__(self, eqtrees=None, embedding=None):
-        # 支持多个表达式树
-        self.eqtrees = eqtrees or [nd.Variable('x1')]
-        self.embedding = embedding  # 表达式嵌入向量
-        self.parent = None
-        self.children = []
+class MCTSNode:
+    """MCTS节点类"""
+
+    def __init__(
+        self,
+        expression: Optional[str] = None,
+        parent: Optional['MCTSNode'] = None,
+        depth: int = 0,
+        max_depth: int = 10
+    ):
+        """
+        初始化MCTS节点
+
+        Args:
+            expression: 当前节点表示的表达式字符串
+            parent: 父节点
+            depth: 当前深度
+            max_depth: 最大搜索深度
+        """
+        self.expression = expression
+        self.parent = parent
+        self.depth = depth
+        self.max_depth = max_depth
+
+        # MCTS统计信息
         self.visits = 0
-        self.value = 0.0
-        self.reward = 0.0
-        self.r2 = -np.inf
-        self.complexity = 0
-        self.phi = None  # 组合后的最终表达式
-        self.data_embedding = None  # 对应的数据嵌入
-        self.structure_alignment = 0.0  # 结构对齐分数
-        self.data_alignment = 0.0      # 数据对齐分数
-        self.accuracy_reward = 0.0     # 真实精度奖励
-        
-    def is_leaf(self):
-        return len(self.children) == 0
-    
-    def add_child(self, child):
-        child.parent = self
+        self.value_sum = 0.0
+        self.total_reward = 0.0
+
+        # 奖励分解
+        self.reward_breakdown = {
+            'accuracy': 0.0,
+            'data_alignment': 0.0,
+            'structure_alignment': 0.0,
+            'complexity': 0.0,
+            'stability': 0.0
+        }
+
+        # 子节点
+        self.children = []
+        self.children_dict = {}  # 用于快速查找子节点
+
+        # 是否为叶子节点
+        self.is_terminal = depth >= max_depth
+
+        # 节点对应的数据嵌入（对于某些任务可缓存）
+        self.data_embedding = None
+
+    def add_child(self, child_expression: str) -> 'MCTSNode':
+        """添加子节点"""
+        # 检查是否已存在
+        if child_expression in self.children_dict:
+            return self.children_dict[child_expression]
+
+        # 创建新子节点
+        child = MCTSNode(
+            expression=child_expression,
+            parent=self,
+            depth=self.depth + 1,
+            max_depth=self.max_depth
+        )
+
         self.children.append(child)
-        
-    def uct_value(self, c=1.4):
+        self.children_dict[child_expression] = child
+
+        return child
+
+    def update(self, reward: float, reward_breakdown: Optional[Dict[str, float]] = None):
+        """更新节点统计信息"""
+        self.visits += 1
+        self.value_sum += reward
+        self.total_reward = self.value_sum / self.visits
+
+        if reward_breakdown:
+            # 更新奖励分解
+            for key, value in reward_breakdown.items():
+                if key in self.reward_breakdown:
+                    self.reward_breakdown[key] = value
+
+    def get_average_reward(self) -> float:
+        """获取平均奖励"""
+        return self.total_reward
+
+    def get_ucb_score(self, exploration_constant: float = 1.4) -> float:
+        """计算UCB (Upper Confidence Bound) 分数"""
+        if self.parent is None:
+            return float('inf') if self.visits == 0 else self.total_reward
+
         if self.visits == 0:
             return float('inf')
-        return self.value / self.visits + c * np.sqrt(np.log(self.parent.visits + 1) / (self.visits + 1))
+
+        # UCB公式: Q + c * sqrt(ln(N) / n)
+        # 其中 Q 是平均价值，c 是探索常数，N 是父节点访问次数，n 是当前节点访问次数
+        exploitation = self.total_reward
+        exploration = exploration_constant * math.sqrt(
+            math.log(max(1, self.parent.visits)) / self.visits
+        )
+
+        return exploitation + exploration
+
+    def is_fully_expanded(self) -> bool:
+        """检查节点是否已完全展开"""
+        return len(self.children) > 0 and all(
+            child.visits > 0 for child in self.children
+        )
+
+    def get_most_visited_child(self) -> Optional['MCTSNode']:
+        """获取访问次数最多的子节点"""
+        if not self.children:
+            return None
+
+        return max(self.children, key=lambda c: c.visits)
+
+    def get_best_child(self, by: str = 'reward') -> Optional['MCTSNode']:
+        """获取最佳子节点"""
+        if not self.children:
+            return None
+
+        if by == 'reward':
+            return max(self.children, key=lambda c: c.total_reward)
+        elif by == 'visits':
+            return max(self.children, key=lambda c: c.visits)
+        elif by == 'ucb':
+            return max(self.children, key=lambda c: c.get_ucb_score())
+        else:
+            return max(self.children, key=lambda c: c.total_reward)
+
+    def get_all_expressions(self) -> List[str]:
+        """获取从根到当前节点的所有表达式"""
+        expressions = []
+        node = self
+        while node is not None:
+            if node.expression is not None:
+                expressions.append(node.expression)
+            node = node.parent
+        return list(reversed(expressions))
 
 
-class EnhancedMCTSEngine:
-    """增强的MCTS引擎，集成了编码器功能"""
-    
+class MCTSEngine:
+    """MCTS引擎主类"""
+
     def __init__(
         self,
         expression_encoder,
         data_encoder,
-        max_depth=12,
-        max_iterations=1000,
-        max_vars=5,
-        exploration_constant=1.4,
-        simulation_count=10,
-        reward_weights=None,
-        device='cpu'
+        reward_calculator: RewardCalculator,
+        config: Dict[str, Any],
+        device: str = 'cpu',
+        freeze_encoders: bool = False
     ):
+        """
+        初始化MCTS引擎
+
+        Args:
+            expression_encoder: 表达式编码器
+            data_encoder: 数据编码器
+            reward_calculator: 奖励计算器
+            config: 配置字典
+            device: 设备 (cuda/cpu)
+            freeze_encoders: 是否冻结编码器（用于推理阶段）
+        """
         self.expression_encoder = expression_encoder
         self.data_encoder = data_encoder
+        self.reward_calculator = reward_calculator
+        self.config = config
         self.device = device
-        
+        self.freeze_encoders = freeze_encoders
+
         # MCTS参数
-        self.max_vars = max_vars
-        self.max_depth = max_depth
-        self.max_iterations = max_iterations
-        self.exploration_constant = exploration_constant
-        self.simulation_count = simulation_count
-        
-        # 奖励权重
-        self.reward_weights = reward_weights or {
-            'structure_alignment': 0.3,
-            'data_alignment': 0.4,
-            'accuracy': 0.3
+        self.max_depth = config.get('max_depth', 10)
+        self.max_iterations = config.get('max_iterations', 1000)
+        self.exploration_constant = config.get('exploration_constant', 1.4)
+        self.simulation_count = config.get('simulation_count', 10)
+
+        # 表达式构建参数
+        self.max_variables = config.get('max_variables', 5)
+        self.allowed_operators = config.get('allowed_operators', [
+            '+', '-', '*', '/', '^'
+        ])
+        self.allowed_functions = config.get('allowed_functions', [
+            'sin', 'cos', 'tan', 'log', 'ln', 'exp', 'sqrt', 'abs'
+        ])
+
+        # 预定义表达式模板（用于快速扩展）
+        self.expression_templates = config.get('expression_templates', [
+            # 基础操作
+            "x{i}",
+            "x{i} + x{j}",
+            "x{i} - x{j}",
+            "x{i} * x{j}",
+            "x{i} / (x{j} + 1e-8)",
+            "x{i}^2",
+            "x{i}^3",
+
+            # 三角函数
+            "sin(x{i})",
+            "cos(x{i})",
+            "sin(x{i} + x{j})",
+            "cos(x{i} * x{j})",
+
+            # 指数和对数
+            "exp(x{i})",
+            "log(abs(x{i}) + 1e-8)",
+            "exp(-x{i}^2)",
+
+            # 复合表达式
+            "x{i} * sin(x{j})",
+            "x{i} + cos(x{j})",
+            "sin(x{i}) * cos(x{j})",
+            "x{i}^2 + x{j}^2",
+            "x{i} * exp(-x{j})",
+            "sqrt(x{i}^2 + x{j}^2)",
+            "x{i}^3 + x{j}^3 - x{i} * x{j}",
+            "sin(x{i} * x{j}) + cos(x{i} / x{j})",
+            "exp(-x{i}^2) * sin(x{j})",
+            "log(x{i}^2 + x{j}^2) + x{i}",
+        ])
+
+        # 缓存
+        self.embedding_cache = {}  # 缓存表达式嵌入
+        self.expr_cache = {}  # 缓存表达式计算结果
+
+        # 统计信息
+        self.statistics = {
+            'total_iterations': 0,
+            'total_simulations': 0,
+            'unique_expressions': 0,
+            'cache_hits': 0,
+            'cache_misses': 0,
         }
-        
-        # nd2py操作符
-        self.binary_ops = [nd.Add, nd.Sub, nd.Mul, nd.Div]
-        self.unary_ops = [nd.Sin, nd.Cos, nd.Sqrt, nd.Log, nd.Exp]
-        self.constants = [nd.Number(1), nd.Number(2), nd.Number(0.5)]
-        
-        # 变量列表
-        self.variables = []
-        
-        # 最佳结果
-        self.best_expr = None
-        self.best_r2 = -np.inf
-        
-        # 经验回放池
-        self.experience_buffer = deque(maxlen=10000)
-        
-    def fit(
-        self, 
-        X, 
-        y, 
-        variables=None, 
-        true_expression=None,
-        target_data_embedding=None
-    ):
+
+    def search(
+        self,
+        task_data: Optional[Tuple[np.ndarray, np.ndarray]] = None,
+        task_embedding: Optional[torch.Tensor] = None,
+        target_expression: Optional[str] = None,
+        verbose: bool = False
+    ) -> Tuple[str, float, Dict[str, float]]:
         """
-        使用增强的MCTS进行符号回归
-        
+        执行MCTS搜索
+
         Args:
-            X: 输入数据
-            y: 目标值
-            variables: 变量列表
-            true_expression: 真实表达式（用于微调）
-            target_data_embedding: 目标数据嵌入
+            task_data: 任务数据 (X, y)
+            task_embedding: 任务数据的嵌入向量
+            target_expression: 目标表达式（真实解，用于微调阶段）
+            verbose: 是否打印详细信息
+
+        Returns:
+            (最佳表达式, 最佳奖励, 奖励分解)
         """
-        # 预处理数据
-        X, y = self._preprocess_data(X, y)
-        
-        # 设置变量
-        if variables is not None:
-            self.variables = variables
-        else:
-            # 处理字典格式的X
-            if isinstance(X, dict):
-                self.variables = [nd.Variable(f'x{i+1}') for i in range(len(X))]
+        # 预处理任务数据
+        if task_embedding is None and task_data is not None:
+            X, y = task_data
+            X_tensor = torch.FloatTensor(X).to(self.device)
+            y_tensor = torch.FloatTensor(y).to(self.device)
+
+            if self.freeze_encoders:
+                self.expression_encoder.eval()
+                self.data_encoder.eval()
+                with torch.no_grad():
+                    task_embedding = self.data_encoder.encode(X_tensor, y_tensor)
             else:
-                self.variables = [nd.Variable(f'x{i+1}') for i in range(X.shape[1])]
-        
-        # 计算目标嵌入
-        target_expr_embedding = None
-        if true_expression is not None:
-            target_expr_embedding = self.expression_encoder.encode(true_expression)
-            
-        if target_data_embedding is None:
-            target_data_embedding = self.data_encoder.encode(X, y)
-            
+                task_embedding = self.data_encoder.encode(X_tensor, y_tensor)
+
         # 初始化根节点
-        self.root = EnhancedNode(
-            self.variables[:min(len(self.variables), self.max_vars)]
-        )
-        self.root.data_embedding = target_data_embedding
-        
-        # 评估根节点
-        self._evaluate_node(self.root, X, y, target_data_embedding, target_expr_embedding)
-        
-        for i in range(self.max_iterations):
-            # 1. 选择
-            node = self._select(self.root)
-            
-            # 2. 扩展
-            if not self._is_terminal(node) and node.visits > 0:
-                node = self._expand(node, X, y, target_data_embedding, target_expr_embedding)
-            
-            # 3. 模拟
-            reward, best_node = self._simulate(
-                node, X, y, target_data_embedding, target_expr_embedding
-            )
-            
-            # 4. 回溯
-            self._backpropagate(node, reward)
-            
-            # 更新最佳表达式
-            if best_node.r2 > self.best_r2:
-                self.best_r2 = best_node.r2
-                self.best_expr = best_node.phi
-                
-            if i % 500 == 0:
-                print(f"Iteration {i}: Best R2 = {self.best_r2:.4f}, Best Expr = {self.best_expr}")
-                
-        return self.best_expr
-    
-    def predict(self, X):
-        """使用最佳表达式进行预测"""
-        if self.best_expr is None:
-            raise ValueError("Model not fitted yet")
-        X, _ = self._preprocess_data(X, None)
-        return self._evaluate_expression(self.best_expr, X)
-    
-    def get_score(self, X, y):
-        """获取模型分数"""
-        y_pred = self.predict(X)
-        r2 = R2_score(y, y_pred)
-        rmse = RMSE_score(y, y_pred)
-        return r2, rmse
-    
-    def _preprocess_data(self, X, y=None):
-        """数据预处理"""
-        if isinstance(X, np.ndarray):
-            X = {f'x{i+1}': X[:, i] for i in range(X.shape[1])}
-        if y is not None and not isinstance(y, np.ndarray):
-            y = np.array(y)
-        return X, y
-    
-    def _select(self, node):
-        """使用UCT策略选择节点"""
-        while not node.is_leaf():
-            node = max(node.children, key=lambda n: n.uct_value(self.exploration_constant))
+        root = MCTSNode(depth=0, max_depth=self.max_depth)
+
+        # 主搜索循环
+        best_expression = None
+        best_reward = float('-inf')
+        best_reward_breakdown = {}
+
+        for iteration in range(self.max_iterations):
+            # MCTS的四个步骤：选择、扩展、模拟、反向传播
+
+            # 1. 选择 (Selection)
+            node = self._select_node(root)
+
+            # 2. 扩展 (Expansion)
+            if not node.is_terminal:
+                node = self._expand_node(node)
+
+            # 3. 模拟 (Simulation/Rollout)
+            if node is not None and node.expression:
+                simulation_reward, reward_breakdown = self._simulate(
+                    node.expression,
+                    task_embedding,
+                    target_expression,
+                    task_data
+                )
+
+                # 4. 反向传播 (Backpropagation)
+                self._backpropagate(node, simulation_reward, reward_breakdown)
+
+                # 更新最佳解
+                if simulation_reward > best_reward:
+                    best_reward = simulation_reward
+                    best_expression = node.expression
+                    best_reward_breakdown = copy.deepcopy(reward_breakdown)
+            else:
+                # 如果节点没有表达式，使用默认奖励
+                simulation_reward = 0.0
+                reward_breakdown = {}
+
+            # 更新统计信息
+            self.statistics['total_iterations'] += 1
+            self.statistics['total_simulations'] += 1
+
+            # 打印进度
+            if verbose and (iteration + 1) % 100 == 0:
+                print(f"Iteration {iteration + 1}/{self.max_iterations}, "
+                      f"Best Reward: {best_reward:.4f}, "
+                      f"Best Expression: {best_expression}")
+
+        # 获取最终结果
+        if best_expression is None:
+            best_child = root.get_best_child(by='reward')
+            if best_child:
+                best_expression = best_child.expression
+                best_reward = best_child.get_average_reward()
+                best_reward_breakdown = best_child.reward_breakdown
+
+        # 打印最终统计信息
+        if verbose:
+            self._print_statistics()
+
+        return best_expression or "", best_reward, best_reward_breakdown
+
+    def _select_node(self, root: MCTSNode) -> MCTSNode:
+        """选择步骤：使用UCB选择最佳节点"""
+        node = root
+
+        # 沿着UCB分数最高的路径向下选择
+        while not node.is_terminal and node.is_fully_expanded():
+            node = node.get_best_child(by='ucb')
+
         return node
-    
-    def _is_terminal(self, node):
-        """检查是否达到终端条件"""
-        return self._get_depth(node) >= self.max_depth
-    
-    def _get_depth(self, node):
-        """获取节点深度"""
-        depth = 0
-        while node.parent:
-            depth += 1
-            node = node.parent
-        return depth
-    
-    def _expand(self, node, X, y, target_data_embedding, target_expr_embedding):
-        """扩展节点，生成子节点"""
-        for _ in range(10):  # 每次扩展10个子节点
-            new_eqtrees = self._mutate_eqtrees(node.eqtrees)
-            child = EnhancedNode(new_eqtrees)
-            
-            # 计算子节点的嵌入
-            try:
-                expr_str = self._eqtrees_to_string(new_eqtrees)
-                child.embedding = self.expression_encoder.encode(expr_str)
-            except:
-                child.embedding = np.zeros(self.expression_encoder.projection_dim)
-            
-            child.data_embedding = target_data_embedding
-            
-            # 评估子节点
-            self._evaluate_node(child, X, y, target_data_embedding, target_expr_embedding)
-            node.add_child(child)
-            
-        return random.choice(node.children)
-    
-    def _eqtrees_to_string(self, eqtrees):
-        """将表达式树转换为字符串"""
-        if not eqtrees:
-            return "0"
-        expr_parts = []
-        for eqtree in eqtrees:
-            try:
-                expr_parts.append(str(eqtree))
-            except:
-                expr_parts.append("x1")
-        return " + ".join(expr_parts)
-    
-    def _mutate_eqtrees(self, eqtrees):
-        """变异表达式树"""
-        mutation_type = random.choice(['add', 'replace', 'modify'])
-        
-        if mutation_type == 'add' and len(eqtrees) < self.max_vars:
-            # 添加新的表达式树
-            op = random.choice(self.binary_ops)
-            operand1 = random.choice(eqtrees + self.variables + self.constants)
-            operand2 = random.choice(eqtrees + self.variables + self.constants)
-            new_eqtree = copy.deepcopy(op(operand1, operand2))
-            return eqtrees + [new_eqtree]
-            
-        elif mutation_type == 'replace':
-            # 替换一个表达式树
-            idx = random.randint(0, len(eqtrees) - 1)
-            new_eqtree = self._generate_random_expr()
-            return eqtrees[:idx] + [new_eqtree] + eqtrees[idx+1:]
-            
-        else:  # modify
-            # 修改一个表达式树
-            idx = random.randint(0, len(eqtrees) - 1)
-            eqtree_copy = copy.deepcopy(eqtrees[idx])
-            
-            if random.random() < 0.5:
-                # 添加二元运算
-                op = random.choice(self.binary_ops)
-                operand = random.choice(self.variables + self.constants)
-                if random.random() < 0.5:
-                    new_eqtree = copy.deepcopy(op(eqtree_copy, operand))
-                else:
-                    new_eqtree = copy.deepcopy(op(operand, eqtree_copy))
-            else:
-                # 添加一元运算
-                op = random.choice(self.unary_ops)
-                new_eqtree = copy.deepcopy(op(eqtree_copy))
-                
-            return eqtrees[:idx] + [new_eqtree] + eqtrees[idx+1:]
-    
-    def _generate_random_expr(self):
-        """生成随机表达式"""
-        expr_type = random.choice(['variable', 'constant', 'unary', 'binary'])
-        
-        if expr_type == 'variable':
-            return copy.deepcopy(random.choice(self.variables))
-        elif expr_type == 'constant':
-            return copy.deepcopy(random.choice(self.constants))
-        elif expr_type == 'unary':
-            op = random.choice(self.unary_ops)
-            operand = self._generate_random_expr()
-            return copy.deepcopy(op(operand))
-        else:  # binary
-            op = random.choice(self.binary_ops)
-            operand1 = self._generate_random_expr()
-            operand2 = self._generate_random_expr()
-            return copy.deepcopy(op(operand1, operand2))
-    
-    def _simulate(self, node, X, y, target_data_embedding, target_expr_embedding):
-        """模拟阶段"""
-        current_eqtrees = node.eqtrees.copy()
-        best_node = node
-        
-        for _ in range(self.simulation_count):
-            depth = self._get_depth(node)
-            temp_eqtrees = current_eqtrees.copy()
-            
-            while depth < self.max_depth:
-                temp_eqtrees = self._mutate_eqtrees(temp_eqtrees)
-                depth += 1
-            
-            # 评估表达式
-            temp_node = EnhancedNode(temp_eqtrees)
-            
-            # 计算嵌入
-            try:
-                expr_str = self._eqtrees_to_string(temp_eqtrees)
-                temp_node.embedding = self.expression_encoder.encode(expr_str)
-            except:
-                temp_node.embedding = np.zeros(self.expression_encoder.projection_dim)
-            
-            temp_node.data_embedding = target_data_embedding
-            
-            self._evaluate_node(temp_node, X, y, target_data_embedding, target_expr_embedding)
-            
-            if temp_node.r2 > best_node.r2:
-                best_node = temp_node
-                
-        return best_node.reward, best_node
-    
-    def _evaluate_node(self, node, X, y, target_data_embedding, target_expr_embedding):
-        """评估节点，计算复合奖励"""
-        try:
-            # 首先计算传统的R2分数
-            self._evaluate_node_traditional(node, X, y)
-            
-            # 计算嵌入对齐奖励
-            self._evaluate_embedding_alignment(
-                node, target_data_embedding, target_expr_embedding
-            )
-            
-            # 计算最终复合奖励
-            node.reward = (
-                self.reward_weights['structure_alignment'] * node.structure_alignment +
-                self.reward_weights['data_alignment'] * node.data_alignment +
-                self.reward_weights['accuracy'] * max(0, node.r2)
-            )
-            
-            # 存储到经验回放池
-            self.experience_buffer.append({
-                'expression': node.phi,
-                'r2': node.r2,
-                'reward': node.reward,
-                'embedding': node.embedding,
-                'data_embedding': node.data_embedding
-            })
-            
-        except Exception as e:
-            print(f"Error evaluating node: {e}")
-            node.r2 = -np.inf
-            node.complexity = float('inf')
-            node.reward = 0
-            node.phi = nd.Number(0.0)
-            node.structure_alignment = 0.0
-            node.data_alignment = 0.0
-    
-    def _evaluate_node_traditional(self, node, X, y):
-        """传统的节点评估（R2和复杂度）"""
-        try:
-            # 计算每个表达式树的输出
-            Z = np.zeros((len(y), 1 + len(node.eqtrees)))
-            Z[:, 0] = 1.0  # 常数项
-            
-            for i, eqtree in enumerate(node.eqtrees):
+
+    def _expand_node(self, node: MCTSNode) -> Optional[MCTSNode]:
+        """扩展步骤：添加新的子节点"""
+        # 获取候选表达式
+        candidates = self._generate_candidate_expressions(node)
+
+        if not candidates:
+            return node  # 如果没有候选表达式，返回当前节点
+
+        # 随机选择一个候选表达式
+        new_expression = random.choice(candidates)
+
+        # 添加为子节点
+        child = node.add_child(new_expression)
+
+        return child
+
+    def _generate_candidate_expressions(self, node: MCTSNode) -> List[str]:
+        """生成候选表达式"""
+        candidates = []
+        depth = node.depth
+
+        if depth == 0:
+            # 根节点：生成基础表达式
+            for i in range(1, min(3, self.max_variables) + 1):
+                candidates.append(f"x{i}")
+        else:
+            # 非根节点：基于模板生成复合表达式
+            for template in self.expression_templates:
                 try:
-                    expr_copy = copy.deepcopy(eqtree)
-                    Z[:, i+1] = self._evaluate_expression(expr_copy, X)
-                except:
-                    Z[:, i+1] = np.zeros(len(y))
-            
-            # 检查有效性
-            if not np.isfinite(Z).all():
-                node.r2 = -np.inf
-                node.complexity = float('inf')
-                node.phi = nd.Number(0.0)
-                return
-                
-            # 避免溢出
-            Z_max = np.max(np.abs(Z))
-            if Z_max > 1e6:
-                Z = Z / Z_max
-                
-            # 线性组合
-            try:
-                reg = 1e-6 * np.eye(Z.shape[1])
-                A = np.linalg.solve(Z.T @ Z + reg, Z.T @ y)
-                A = np.round(A, 6)
-                y_pred = Z @ A
-                node.r2 = R2_score(y, y_pred)
-            except:
-                A = np.linalg.pinv(Z) @ y
-                A = np.round(A, 6)
-                y_pred = Z @ A
-                node.r2 = R2_score(y, y_pred)
-            
-            # 构建最终表达式
-            node.phi = nd.Number(A[0]) if abs(A[0]) > 1e-6 else None
-            for a, eqtree in zip(A[1:], node.eqtrees):
-                if abs(a) < 1e-6:
+                    # 替换模板中的变量
+                    expr = self._fill_template(template, depth)
+                    if expr and self._is_valid_expression(expr):
+                        candidates.append(expr)
+                except Exception:
                     continue
-                elif abs(a - 1.0) < 1e-6:
-                    if node.phi is None:
-                        node.phi = eqtree
-                    else:
-                        node.phi = node.phi + eqtree
-                elif abs(a + 1.0) < 1e-6:
-                    if node.phi is None:
-                        node.phi = -eqtree
-                    else:
-                        node.phi = node.phi - eqtree
-                else:
-                    if node.phi is None:
-                        node.phi = nd.Number(a) * eqtree
-                    else:
-                        node.phi = node.phi + nd.Number(a) * eqtree
-                        
-            if node.phi is None:
-                node.phi = nd.Number(0.0)
-                
-            node.complexity = len(str(node.phi))
-            
-        except:
-            node.r2 = -np.inf
-            node.complexity = float('inf')
-            node.phi = nd.Number(0.0)
-    
-    def _evaluate_embedding_alignment(self, node, target_data_embedding, target_expr_embedding):
-        """评估嵌入对齐"""
+
+        # 去重
+        candidates = list(set(candidates))
+
+        # 限制候选数量
+        if len(candidates) > 20:
+            candidates = random.sample(candidates, 20)
+
+        return candidates
+
+    def _fill_template(self, template: str, depth: int) -> Optional[str]:
+        """填充表达式模板"""
         try:
-            # 数据对齐奖励
-            if node.embedding is not None and target_data_embedding is not None:
-                # 确保嵌入向量在CPU上，然后转换为张量
-                if isinstance(node.embedding, torch.Tensor):
-                    node_embedding_np = node.embedding.detach().cpu().numpy()
-                else:
-                    node_embedding_np = node.embedding
-                    
-                if isinstance(target_data_embedding, torch.Tensor):
-                    target_data_np = target_data_embedding.detach().cpu().numpy()
-                else:
-                    target_data_np = target_data_embedding
-                
-                expr_embedding = torch.FloatTensor(node_embedding_np).unsqueeze(0).to(self.device)
-                data_embedding = torch.FloatTensor(target_data_np).unsqueeze(0).to(self.device)
-                
-                # 计算余弦相似度
-                data_alignment = F.cosine_similarity(expr_embedding, data_embedding).item()
-                node.data_alignment = max(0, data_alignment)
-            
-            # 结构对齐奖励（如果提供了真实表达式）
-            if target_expr_embedding is not None and node.embedding is not None:
-                # 确保输入是numpy格式，然后转换为张量
-                if isinstance(target_expr_embedding, torch.Tensor):
-                    target_expr_embedding_np = target_expr_embedding.detach().cpu().numpy()
-                else:
-                    target_expr_embedding_np = target_expr_embedding
-                    
-                if isinstance(node.embedding, torch.Tensor):
-                    node_embedding_np = node.embedding.detach().cpu().numpy()
-                else:
-                    node_embedding_np = node.embedding
+            # 替换变量索引
+            expr = template.replace('{i}', str(random.randint(1, min(3, self.max_variables))))
+            expr = expr.replace('{j}', str(random.randint(1, min(3, self.max_variables))))
 
-                target_embedding = torch.FloatTensor(target_expr_embedding_np).unsqueeze(0).to(self.device)
-                expr_embedding = torch.FloatTensor(node_embedding_np).unsqueeze(0).to(self.device)
+            # 检查深度，避免过于复杂
+            if depth >= self.max_depth - 2:
+                # 接近最大深度时，只返回简单表达式
+                if 'sin' in expr or 'cos' in expr or 'exp' in expr:
+                    return f"x{random.randint(1, min(3, self.max_variables))}"
+                if '^' in expr:
+                    expr = re.sub(r'\^\d+', '^2', expr)
 
-                structure_alignment = F.cosine_similarity(expr_embedding, target_embedding).item()
-                node.structure_alignment = max(0, structure_alignment)
-            else:
-                node.structure_alignment = 0.0
-            
+            return expr
+        except Exception:
+            return None
+
+    def _is_valid_expression(self, expression: str) -> bool:
+        """检查表达式是否有效"""
+        if not expression or len(expression) > 200:
+            return False
+
+        # 基本语法检查
+        try:
+            # 检查括号匹配
+            if expression.count('(') != expression.count(')'):
+                return False
+
+            # 检查基本模式
+            invalid_patterns = [
+                r'\.\.',  # 双点
+                r'\+\+',  # 双加号
+                r'--',    # 双减号
+                r'\*\*',  # 双星号（除了指数）
+            ]
+
+            for pattern in invalid_patterns:
+                if re.search(pattern, expression):
+                    return False
+
+            return True
+
+        except Exception:
+            return False
+
+    def _simulate(
+        self,
+        expression: str,
+        task_embedding: Optional[torch.Tensor],
+        target_expression: Optional[str],
+        task_data: Optional[Tuple[np.ndarray, np.ndarray]]
+    ) -> Tuple[float, Dict[str, float]]:
+        """模拟步骤：评估表达式的奖励"""
+        try:
+            # 计算表达式嵌入
+            expr_embedding = self._get_expression_embedding(expression)
+
+            # 计算奖励
+            reward_dict = self._calculate_reward(
+                expression,
+                expr_embedding,
+                task_embedding,
+                target_expression,
+                task_data
+            )
+
+            # 提取总奖励
+            total_reward = reward_dict.get('total', 0.0)
+
+            return total_reward, reward_dict
+
         except Exception as e:
-            print(f"Error computing alignment: {e}")
-            node.data_alignment = 0.0
-            node.structure_alignment = 0.0
-    
-    def _evaluate_expression(self, expr, X):
-        """评估单个表达式"""
+            # 如果评估失败，返回低奖励
+            return 0.0, {
+                'accuracy': 0.0,
+                'data_alignment': 0.0,
+                'structure_alignment': 0.0,
+                'complexity': 0.0,
+                'total': 0.0
+            }
+
+    def _get_expression_embedding(self, expression: str) -> torch.Tensor:
+        """获取表达式嵌入（带缓存）"""
+        # 检查缓存
+        if expression in self.embedding_cache:
+            self.statistics['cache_hits'] += 1
+            return self.embedding_cache[expression]
+
+        self.statistics['cache_misses'] += 1
+
+        # 计算嵌入
+        if self.freeze_encoders:
+            self.expression_encoder.eval()
+            with torch.no_grad():
+                embedding = self.expression_encoder.encode(expression, training=False)
+        else:
+            embedding = self.expression_encoder.encode(expression, training=True)
+
+        # 缓存
+        self.embedding_cache[expression] = embedding
+
+        return embedding
+
+    def _calculate_reward(
+        self,
+        expression: str,
+        expr_embedding: torch.Tensor,
+        task_embedding: Optional[torch.Tensor],
+        target_expression: Optional[str],
+        task_data: Optional[Tuple[np.ndarray, np.ndarray]]
+    ) -> Dict[str, float]:
+        """计算复合奖励"""
+        reward_dict = {
+            'accuracy': 0.0,
+            'data_alignment': 0.0,
+            'structure_alignment': 0.0,
+            'complexity': 0.0,
+            'stability': 0.0
+        }
+
+        # 1. 数据对齐奖励
+        if task_embedding is not None:
+            reward_dict['data_alignment'] = self.reward_calculator._calculate_data_alignment_reward(
+                expr_embedding.cpu().numpy(),
+                task_embedding.cpu().numpy()
+            )
+
+        # 2. 结构对齐奖励（仅在微调阶段使用）
+        if target_expression is not None:
+            try:
+                target_embedding = self._get_expression_embedding(target_expression)
+                reward_dict['structure_alignment'] = self.reward_calculator._calculate_structure_alignment_reward(
+                    expr_embedding.cpu().numpy(),
+                    target_embedding.cpu().numpy()
+                )
+            except Exception:
+                reward_dict['structure_alignment'] = 0.0
+
+        # 3. 准确度奖励（真实精度）
+        if task_data is not None:
+            X, y = task_data
+            try:
+                r2_score = self._evaluate_expression_accuracy(expression, X, y)
+                reward_dict['accuracy'] = self.reward_calculator._calculate_accuracy_reward(r2_score)
+            except Exception:
+                reward_dict['accuracy'] = 0.0
+
+        # 4. 复杂度惩罚
+        complexity = self._calculate_expression_complexity(expression)
+        reward_dict['complexity'] = self.reward_calculator._calculate_complexity_penalty(complexity)
+
+        # 计算总奖励
+        total_reward = 0.0
+        for component, weight in self.reward_calculator.reward_weights.items():
+            if component in reward_dict:
+                total_reward += weight * reward_dict[component]
+
+        reward_dict['total'] = total_reward
+
+        return reward_dict
+
+    def _evaluate_expression_accuracy(
+        self,
+        expression: str,
+        X: np.ndarray,
+        y: np.ndarray
+    ) -> float:
+        """评估表达式的准确度（R²分数）"""
         try:
-            return expr.eval(X)
-        except:
-            return np.zeros(len(next(iter(X.values()))))
-    
-    def _backpropagate(self, node, reward):
-        """回溯更新节点统计信息"""
-        while node:
-            node.visits += 1
-            node.value += reward
-            node = node.parent
-    
-    def get_experience_buffer(self):
-        """获取经验回放池"""
-        return list(self.experience_buffer)
-    
-    def clear_experience_buffer(self):
-        """清空经验回放池"""
-        self.experience_buffer.clear()
+            # 检查缓存
+            cache_key = f"{expression}_{hash(str(X.shape))}_{hash(str(y.shape))}"
+            if cache_key in self.expr_cache:
+                return self.expr_cache[cache_key]
+
+            # 安全求值
+            y_pred = self._safe_eval_expression(expression, X)
+
+            # 计算R²分数
+            ss_res = np.sum((y - y_pred) ** 2)
+            ss_tot = np.sum((y - np.mean(y)) ** 2)
+
+            # 避免除零
+            if ss_tot == 0:
+                r2_score = 0.0 if np.allclose(y_pred, y) else -np.inf
+            else:
+                r2_score = 1 - (ss_res / ss_tot)
+
+            # 缓存结果
+            self.expr_cache[cache_key] = r2_score
+
+            return r2_score
+
+        except Exception:
+            return -np.inf
+
+    def _safe_eval_expression(self, expression: str, X: np.ndarray) -> np.ndarray:
+        """安全地求值表达式"""
+        # 获取变量数量
+        n_vars = X.shape[1]
+
+        # 构建变量字典
+        var_dict = {}
+        for i in range(n_vars):
+            var_dict[f'x{i + 1}'] = X[:, i]
+
+        # 添加数学函数
+        var_dict.update({
+            'sin': np.sin,
+            'cos': np.cos,
+            'tan': np.tan,
+            'exp': np.exp,
+            'log': np.log,
+            'sqrt': np.sqrt,
+            'abs': np.abs,
+        })
+
+        # 处理表达式
+        expr_str = expression.replace('^', '**')
+
+        # 限制eval的安全性
+        safe_dict = {"__builtins__": {}}
+
+        y_pred = eval(expr_str, safe_dict, var_dict)
+
+        return y_pred
+
+    def _calculate_expression_complexity(self, expression: str) -> float:
+        """计算表达式复杂度"""
+        complexity = 0.0
+
+        # 基础复杂度：token数量
+        complexity += len(expression)
+
+        # 运算符复杂度
+        for op in ['+', '-', '*', '/', '^']:
+            complexity += expression.count(op) * 1.0
+
+        # 函数复杂度
+        for func in self.allowed_functions:
+            complexity += expression.count(func) * 2.0
+
+        # 括号复杂度
+        complexity += expression.count('(') * 0.5
+
+        # 嵌套复杂度（粗略估计）
+        max_nesting = 0
+        current_nesting = 0
+        for char in expression:
+            if char == '(':
+                current_nesting += 1
+                max_nesting = max(max_nesting, current_nesting)
+            elif char == ')':
+                current_nesting -= 1
+
+        complexity += max_nesting * 2.0
+
+        return complexity
+
+    def _backpropagate(
+        self,
+        node: MCTSNode,
+        reward: float,
+        reward_breakdown: Dict[str, float]
+    ):
+        """反向传播：更新路径上所有节点的统计信息"""
+        current = node
+        while current is not None:
+            current.update(reward, reward_breakdown)
+            current = current.parent
+
+    def _print_statistics(self):
+        """打印搜索统计信息"""
+        print("\n=== MCTS搜索统计 ===")
+        for key, value in self.statistics.items():
+            print(f"{key}: {value}")
+        print(f"缓存命中率: {self.statistics['cache_hits'] / max(1, self.statistics['cache_hits'] + self.statistics['cache_misses']):.2%}")
+        print("=====================\n")
+
+    def reset_cache(self):
+        """重置缓存"""
+        self.embedding_cache.clear()
+        self.expr_cache.clear()
+        self.statistics['cache_hits'] = 0
+        self.statistics['cache_misses'] = 0
+
+    def get_search_tree_info(self, root: MCTSNode) -> Dict[str, Any]:
+        """获取搜索树信息"""
+        def collect_info(node: MCTSNode) -> Dict[str, Any]:
+            info = {
+                'expression': node.expression,
+                'depth': node.depth,
+                'visits': node.visits,
+                'value': node.total_reward,
+                'reward_breakdown': node.reward_breakdown,
+                'children': []
+            }
+
+            for child in node.children:
+                info['children'].append(collect_info(child))
+
+            return info
+
+        return collect_info(root)

@@ -118,10 +118,26 @@ def setup_logging():
 
 
 def load_pretrain_data(pretrain_data_path: str = "data/pysr_datasets") -> Optional[Dict[str, Any]]:
-    """加载PySR格式的预训练数据"""
+    """加载PySR格式的预训练数据，如果不存在则自动生成"""
     if not os.path.exists(pretrain_data_path):
-        print(f"警告：预训练数据路径 {pretrain_data_path} 不存在")
-        return None
+        print(f"预训练数据路径 {pretrain_data_path} 不存在，开始自动生成数据...")
+        
+        # 尝试生成PySR数据
+        try:
+            pysr_generate_script_path = os.path.join(project_root, 'scripts', 'generate_pretrain_data_PySR.py')
+            print(f"执行PySR数据生成器: {pysr_generate_script_path}")
+            
+            result = subprocess.run([sys.executable, pysr_generate_script_path], 
+                                   capture_output=True, text=True, cwd=str(project_root))
+            if result.returncode != 0:
+                print(f"PySR数据生成失败: {result.stderr}")
+                return None
+            else:
+                print("PySR数据生成完成")
+                
+        except Exception as e:
+            print(f"自动生成PySR数据失败: {e}")
+            return None
     
     try:
         # 如果是目录，读取所有txt文件
@@ -262,17 +278,10 @@ def convert_pysr_data_to_pretrain_format(pysr_data: List[Dict[str, Any]]) -> Tup
 
 def load_config(config_path: str = "config.yaml") -> Dict[str, Any]:
     """加载配置"""
-    try:
-        import yaml
-        with open(config_path, 'r') as f:
-            config = yaml.safe_load(f)
-        return config
-    except ImportError:
-        print("请安装pyyaml: pip install pyyaml")
-        raise
-    except FileNotFoundError:
-        print(f"配置文件 {config_path} 未找到，使用默认配置")
-        return get_default_config()
+    import yaml
+    with open(config_path, 'r') as f:
+        config = yaml.safe_load(f)
+    return config
 
 
 def get_default_config() -> Dict[str, Any]:
@@ -367,42 +376,20 @@ def main():
             device=device
         )
         
-        # 优先尝试加载PySR格式的预训练数据
+        # 加载PySR格式的预训练数据（如果不存在会自动生成）
         pysr_data_path = "data/pysr_datasets"
         pysr_data = load_pretrain_data(pysr_data_path)
         
-        if pysr_data:
-            logger.info(f"使用PySR格式数据: {pysr_data_path}，共 {len(pysr_data)} 个表达式")
-            # 转换数据格式
-            expressions, datasets = convert_pysr_data_to_pretrain_format(pysr_data)
-            logger.info(f"转换后数据: {len(expressions)} 个表达式")
-            # 开始预训练，从转换的数据加载
-            training_history = pretrain_pipeline.fit(expressions=expressions, datasets=datasets)
-        else:
-            logger.warning("PySR格式数据不存在")
-            # 运行数据生成脚本
-            try:
-                # 优先尝试PySR数据生成器
-                pysr_generate_script_path = os.path.join(project_root, 'scripts', 'generate_pretrain_data_PySR.py')
-                logger.info(f"执行PySR数据生成器: {pysr_generate_script_path}")
-                result = subprocess.run([sys.executable, pysr_generate_script_path], 
-                                        capture_output=True, text=True, cwd=str(project_root))
-                if result.returncode == 0:
-                    logger.info("PySR数据生成完成")
-                    pysr_data = load_pretrain_data(pysr_data_path)
-                    if pysr_data:
-                        expressions, datasets = convert_pysr_data_to_pretrain_format(pysr_data)
-                        logger.info(f"转换后数据: {len(expressions)} 个表达式")
-                        training_history = pretrain_pipeline.fit(expressions=expressions, datasets=datasets)
-                    else:
-                        logger.error("PySR数据生成后仍无法加载数据")
-                        raise FileNotFoundError("PySR数据生成失败")
-                else:
-                    logger.error(f"PySR数据生成失败: {result.stderr}")
-                    raise FileNotFoundError("PySR数据生成失败")
-            except Exception as e:
-                logger.error(f"自动生成数据失败: {e}")
-                raise FileNotFoundError(f"无法生成预训练数据: {e}")
+        if not pysr_data:
+            logger.error("无法加载或生成预训练数据")
+            raise FileNotFoundError("预训练数据加载失败")
+            
+        logger.info(f"使用PySR格式数据: {pysr_data_path}，共 {len(pysr_data)} 个表达式")
+        # 转换数据格式
+        expressions, datasets = convert_pysr_data_to_pretrain_format(pysr_data)
+        logger.info(f"转换后数据: {len(expressions)} 个表达式")
+        # 开始预训练
+        training_history = pretrain_pipeline.fit(expressions=expressions, datasets=datasets)
             
         # 保存最终结果
         pretrain_pipeline.save_pretrained()

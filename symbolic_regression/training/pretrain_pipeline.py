@@ -504,8 +504,8 @@ class PretrainPipeline:
         train_combined, val_combined = train_test_split(
             combined_data, test_size=0.2, random_state=42
         )
-        train_expr, train_data = zip(*train_combined) if train_combined else ([], [])
-        val_expr, val_data = zip(*val_combined) if val_combined else ([], [])
+        train_expr, train_data = zip(*train_combined)
+        val_expr, val_data = zip(*val_combined)
         
         # 创建数据集
         train_dataset = ContrastiveDataset(train_expr, train_data)

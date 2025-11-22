@@ -408,18 +408,17 @@ class PretrainPipeline:
             )
             
             self.optimizer.step()
-            # 注意：对于ReduceLROnPlateau调度器，我们不在这里调用step()
             
             # 统计
             total_loss += batch_loss.item() * batch_size
             total_samples += batch_size
-            total_grad_norm += grad_norm.item() if grad_norm is not None else 0.0
+            total_grad_norm += grad_norm.item()
             num_batches += 1
             
             self.global_step += 1
         
         avg_loss = total_loss / total_samples
-        avg_grad_norm = total_grad_norm / num_batches if num_batches > 0 else 0.0
+        avg_grad_norm = total_grad_norm / num_batches
         
         return {'loss': avg_loss, 'grad_norm': avg_grad_norm}
     
@@ -456,12 +455,12 @@ class PretrainPipeline:
         
         # 计算余弦相似度矩阵
         # 归一化嵌入向量
-        expr_embeddings_norm = F.normalize(expr_embeddings, p=2, dim=1)
-        data_embeddings_norm = F.normalize(data_embeddings, p=2, dim=1)
+        # expr_embeddings_norm = F.normalize(expr_embeddings, p=2, dim=1)
+        # data_embeddings_norm = F.normalize(data_embeddings, p=2, dim=1)
         
         # 计算所有配对的余弦相似度
         # s(E,D) = cos(e, d)
-        similarity_matrix = torch.matmul(expr_embeddings_norm, data_embeddings_norm.transpose(0, 1))  # (batch_size, batch_size)
+        similarity_matrix = torch.matmul(expr_embeddings, data_embeddings.transpose(0, 1))  # (batch_size, batch_size)
         
         # 应用温度缩放
         similarity_matrix = similarity_matrix / self.temperature

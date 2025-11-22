@@ -357,7 +357,7 @@ class OnlineFinetuneLoop:
                         data_X=X,
                         data_y=y
                     )
-                    print(f"真实表达式：{true_expr} \n添加难负样本:{candidate_expr}")
+                    print(f"真实表达式：{true_expr}，准确度：{true_r2:.4f} \n添加难负样本:{candidate_expr}，准确度：{candidate_r2:.4f}\n难负样本结构相似度：{structure_sim:.4f}")
 
                     self.hard_negative_pool.append(sample)
                     self.statistics['hard_negatives_found'] += 1
@@ -376,7 +376,7 @@ class OnlineFinetuneLoop:
                         data_X=X,
                         data_y=y
                     )
-                    print(f"真实表达式：{true_expr} \n添加难负样本:{candidate_expr}")
+                    print(f"真实表达式：{true_expr}，准确度：{true_r2:.4f} \n添加难负样本:{candidate_expr}，准确度：{candidate_r2:.4f}\n难负样本结构相似度：{structure_sim:.4f}，准确度差异：{true_r2 - candidate_r2:.4f}")
                     self.hard_negative_pool.append(sample)
                     self.statistics['hard_negatives_found'] += 1
 

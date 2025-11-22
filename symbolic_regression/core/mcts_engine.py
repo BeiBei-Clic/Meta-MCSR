@@ -26,7 +26,8 @@ class MCTSNode:
         expression: Optional[str] = None,
         parent: Optional['MCTSNode'] = None,
         depth: int = 0,
-        max_depth: int = 10
+        max_depth: int = 10,
+        feature_count: int = 3
     ):
         """
         初始化MCTS节点
@@ -36,11 +37,13 @@ class MCTSNode:
             parent: 父节点
             depth: 当前深度
             max_depth: 最大搜索深度
+            feature_count: 数据特征数量，用于动态生成变量
         """
         self.expression = expression
         self.parent = parent
         self.depth = depth
         self.max_depth = max_depth
+        self.feature_count = feature_count
 
         # MCTS统计信息
         self.visits = 0
@@ -78,7 +81,8 @@ class MCTSNode:
             expression=child_expression,
             parent=self,
             depth=self.depth + 1,
-            max_depth=self.max_depth
+            max_depth=self.max_depth,
+            feature_count=self.feature_count
         )
 
         self.children.append(child)
@@ -297,8 +301,14 @@ class MCTSEngine:
             else:
                 task_embedding = self.data_encoder.encode(X_tensor, y_tensor)
 
+        # 提取任务数据的特征数
+        feature_count = 3  # 默认值
+        if task_data is not None:
+            X, y = task_data
+            feature_count = X.shape[1]
+        
         # 初始化根节点
-        root = MCTSNode(depth=0, max_depth=self.max_depth)
+        root = MCTSNode(depth=0, max_depth=self.max_depth, feature_count=feature_count)
 
         # 主搜索循环
         best_expression = None
@@ -351,7 +361,7 @@ class MCTSEngine:
     def _expand_node(self, node: MCTSNode) -> Optional[MCTSNode]:
         """扩展步骤：添加新的子节点"""
         # 获取候选表达式
-        candidates = self._generate_candidate_expressions(node)
+        candidates = self._generate_candidate_expressions(node, node.feature_count)
 
         if not candidates:
             return node  # 如果没有候选表达式，返回当前节点
@@ -364,21 +374,21 @@ class MCTSEngine:
 
         return child
 
-    def _generate_candidate_expressions(self, node: MCTSNode) -> List[str]:
+    def _generate_candidate_expressions(self, node: MCTSNode, feature_count: int) -> List[str]:
         """生成候选表达式"""
         candidates = []
         depth = node.depth
 
         if depth == 0:
-            # 根节点：生成基础表达式
-            for i in range(1, min(3, self.max_variables) + 1):
+            # 根节点：生成基础表达式，使用实际特征数
+            for i in range(1, min(feature_count, self.max_variables) + 1):
                 candidates.append(f"x{i}")
         else:
             # 非根节点：基于模板生成复合表达式
             for template in self.expression_templates:
                 try:
                     # 替换模板中的变量
-                    expr = self._fill_template(template, depth)
+                    expr = self._fill_template(template, depth, feature_count)
                     if expr and self._is_valid_expression(expr):
                         candidates.append(expr)
                 except Exception:
@@ -393,18 +403,19 @@ class MCTSEngine:
 
         return candidates
 
-    def _fill_template(self, template: str, depth: int) -> Optional[str]:
+    def _fill_template(self, template: str, depth: int, feature_count: int) -> Optional[str]:
         """填充表达式模板"""
         try:
-            # 替换变量索引
-            expr = template.replace('{i}', str(random.randint(1, min(3, self.max_variables))))
-            expr = expr.replace('{j}', str(random.randint(1, min(3, self.max_variables))))
+            # 替换变量索引，使用实际特征数
+            max_var = min(feature_count, self.max_variables)
+            expr = template.replace('{i}', str(random.randint(1, max_var)))
+            expr = expr.replace('{j}', str(random.randint(1, max_var)))
 
             # 检查深度，避免过于复杂
             if depth >= self.max_depth - 2:
                 # 接近最大深度时，只返回简单表达式
                 if 'sin' in expr or 'cos' in expr or 'exp' in expr:
-                    return f"x{random.randint(1, min(3, self.max_variables))}"
+                    return f"x{random.randint(1, min(feature_count, self.max_variables))}"
                 if '^' in expr:
                     expr = re.sub(r'\^\d+', '^2', expr)
 
@@ -448,10 +459,17 @@ class MCTSEngine:
         task_data: Optional[Tuple[np.ndarray, np.ndarray]]
     ) -> Tuple[float, Dict[str, float]]:
         """模拟步骤：通过rollout评估表达式的奖励"""
+        # 提取特征数用于rollout
+        feature_count = 3  # 默认值
+        if task_data is not None:
+            X, y = task_data
+            feature_count = X.shape[1]
+        
         # 执行rollout：从当前表达式开始随机扩展
         rollout_expression, rollout_path = self._rollout(
             expression, 
-            remaining_depth=self.max_depth - self._get_expression_depth(expression)
+            remaining_depth=self.max_depth - self._get_expression_depth(expression),
+            feature_count=feature_count
         )
 
         # 计算最终表达式的奖励
@@ -475,7 +493,7 @@ class MCTSEngine:
         return total_reward, reward_dict
 
 
-    def _rollout(self, start_expression: str, remaining_depth: int) -> Tuple[str, List[str]]:
+    def _rollout(self, start_expression: str, remaining_depth: int, feature_count: int = 3) -> Tuple[str, List[str]]:
         """执行rollout：从起始表达式随机扩展到最大深度
         
         Args:
@@ -495,7 +513,7 @@ class MCTSEngine:
         # 随机扩展直到达到最大深度
         while depth < remaining_depth:
             # 生成候选扩展
-            candidates = self._generate_rollout_candidates(current_expression)
+            candidates = self._generate_rollout_candidates(current_expression, feature_count)
             
             if not candidates:
                 break
@@ -512,11 +530,12 @@ class MCTSEngine:
         
         return current_expression, rollout_path
 
-    def _generate_rollout_candidates(self, current_expression: str) -> List[str]:
+    def _generate_rollout_candidates(self, current_expression: str, feature_count: int) -> List[str]:
         """为rollout生成候选扩展
         
         Args:
             current_expression: 当前表达式
+            feature_count: 特征数量
             
         Returns:
             候选扩展表达式列表
@@ -525,7 +544,7 @@ class MCTSEngine:
         
         # 基于当前表达式生成扩展
         base_candidates = self._generate_base_extensions(current_expression)
-        template_candidates = self._generate_template_extensions()
+        template_candidates = self._generate_template_extensions(feature_count)
         
         candidates.extend(base_candidates)
         candidates.extend(template_candidates)
@@ -535,8 +554,8 @@ class MCTSEngine:
         candidates = [expr for expr in candidates if self._is_valid_expression(expr)]
         
         # 限制候选数量以避免计算爆炸
-        if len(candidates) > 10:
-            candidates = random.sample(candidates, 10)
+        # if len(candidates) > 10:
+        #     candidates = random.sample(candidates, 10)
             
         return candidates
 
@@ -581,8 +600,12 @@ class MCTSEngine:
         
         return extensions
 
-    def _generate_template_extensions(self) -> List[str]:
-        """生成基于模板的扩展"""
+    def _generate_template_extensions(self, feature_count: int) -> List[str]:
+        """生成基于模板的扩展
+        
+        Args:
+            feature_count: 特征数量
+        """
         if not self.expression_templates:
             return []
         
@@ -595,7 +618,7 @@ class MCTSEngine:
         extensions = []
         for template in selected_templates:
             try:
-                expr = self._fill_template(template, depth=1)
+                expr = self._fill_template(template, depth=1, feature_count=feature_count)
                 if expr and self._is_valid_expression(expr):
                     extensions.append(expr)
             except Exception:

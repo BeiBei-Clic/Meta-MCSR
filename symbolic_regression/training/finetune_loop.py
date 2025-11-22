@@ -237,7 +237,7 @@ class OnlineFinetuneLoop:
                 true_expr, X, y = train_tasks[task_idx]
 
                 # 执行MCTS探索
-                best_expr = self.mcts_engine.search(
+                best_expr, mcts_reward = self.mcts_engine.search(
                     task_data=(X, y),
                     target_expression=true_expr,
                     verbose=False
@@ -304,12 +304,6 @@ class OnlineFinetuneLoop:
                     self.save_pretrained(output_dir)
                     self.logger.info(f"新的最佳模型已保存，验证奖励: {self.best_reward:.4f}")
 
-                if verbose:
-                    print(f"\nEpoch {epoch+1} 验证结果:")
-                    print(f"  验证奖励: {val_metrics['reward']:.4f}")
-                    print(f"  难负样本池大小: {len(self.hard_negative_pool)}")
-                    print(f"  当前学习率: {self.optimizer.param_groups[0]['lr']:.2e}\n")
-
                 self.logger.info(
                     f"Epoch {epoch+1}: Val Reward = {val_metrics['reward']:.4f}, "
                     f"Hard Neg Pool = {len(self.hard_negative_pool)}"
@@ -326,7 +320,6 @@ class OnlineFinetuneLoop:
         pbar.close() if verbose else None
 
         self.logger.info("在线微调完成！")
-        self.logger.info(f"总共发现 {self.statistics['hard_negatives_found']} 个难负样本")
 
         return train_history
 
@@ -364,6 +357,7 @@ class OnlineFinetuneLoop:
                         data_X=X,
                         data_y=y
                     )
+                    print(f"真实表达式：{true_expr} \n添加难负样本:{candidate_expr}")
 
                     self.hard_negative_pool.append(sample)
                     self.statistics['hard_negatives_found'] += 1
@@ -382,6 +376,7 @@ class OnlineFinetuneLoop:
                         data_X=X,
                         data_y=y
                     )
+                    print(f"真实表达式：{true_expr} \n添加难负样本:{candidate_expr}")
                     self.hard_negative_pool.append(sample)
                     self.statistics['hard_negatives_found'] += 1
 
@@ -545,7 +540,7 @@ class OnlineFinetuneLoop:
         with torch.no_grad():
             for true_expr, X, y in val_tasks:
                 # 执行MCTS搜索
-                best_expr, mcts_reward, _ = self.mcts_engine.search(
+                best_expr, mcts_reward = self.mcts_engine.search(
                     task_data=(X, y),
                     target_expression=true_expr,
                     verbose=False

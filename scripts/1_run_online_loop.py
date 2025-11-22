@@ -38,79 +38,70 @@ def load_pysr_datasets(data_dir: str = "data/pysr_datasets") -> Optional[List[Di
     if not os.path.exists(data_dir):
         print(f"错误：数据路径 {data_dir} 不存在")
         return None
+
+    # 读取所有txt文件
+    datasets = []
+    txt_files = sorted([f for f in os.listdir(data_dir) if f.endswith('.txt')])
     
-    try:
-        # 读取所有txt文件
-        datasets = []
-        txt_files = sorted([f for f in os.listdir(data_dir) if f.endswith('.txt')])
-        
-        print(f"在目录 {data_dir} 中找到 {len(txt_files)} 个数据文件")
-        
-        if len(txt_files) == 0:
-            print("没有找到数据文件")
-            return None
-        
-        # 处理所有文件
-        for file_name in txt_files:
-            file_path = os.path.join(data_dir, file_name)
-            
-            with open(file_path, 'r', encoding='utf-8') as f:
-                lines = f.readlines()
-            
-            if len(lines) < 2:
-                print(f"  文件 {file_name} 内容不足，跳过")
-                continue
-            
-            # 解析第一行的表达式
-            first_line = lines[0].strip()
-            if first_line.startswith('表达式: '):
-                expression = first_line.replace('表达式: ', '').strip()
-            else:
-                print(f"  文件 {file_name} 第一行格式错误: {first_line[:50]}...")
-                continue
-            
-            # 解析数据行
-            samples = []
-            for line in lines[1:]:
-                line = line.strip()
-                if not line:
-                    continue
-                
-                try:
-                    # 解析任意维度数据格式: x1,x2,x3,...,y
-                    parts = line.split(',')
-                    if len(parts) >= 2:  # 至少要有x变量和y值
-                        # 最后一个值是y，前面的都是x变量
-                        x_values = [float(part) for part in parts[:-1]]
-                        y_value = float(parts[-1])
-                        
-                        samples.append((x_values, y_value))
-                    else:
-                        print(f"    数据格式错误: {line}")
-                except (ValueError, IndexError) as e:
-                    print(f"    解析数据失败: {line} (错误: {e})")
-                    continue
-            
-            if expression and samples:
-                datasets.append({
-                    'expression': expression,
-                    'samples': samples
-                })
-                # print(f"  加载表达式: {expression[:50]}... 样本数: {len(samples)}")
-            else:
-                print(f"  文件 {file_name} 无有效数据")
-        
-        print(f"成功加载 {len(datasets)} 个表达式数据\n")
-        return datasets
-        
-    except Exception as e:
-        print(f"加载数据时发生错误: {e}")
+    print(f"在目录 {data_dir} 中找到 {len(txt_files)} 个数据文件")
+    
+    if len(txt_files) == 0:
+        print("没有找到数据文件")
         return None
-
-
-
-
-
+    
+    # 处理所有文件
+    for file_name in txt_files:
+        file_path = os.path.join(data_dir, file_name)
+        
+        with open(file_path, 'r', encoding='utf-8') as f:
+            lines = f.readlines()
+        
+        if len(lines) < 2:
+            print(f"  文件 {file_name} 内容不足，跳过")
+            continue
+        
+        # 解析第一行的表达式
+        first_line = lines[0].strip()
+        if first_line.startswith('表达式: '):
+            expression = first_line.replace('表达式: ', '').strip()
+        else:
+            print(f"  文件 {file_name} 第一行格式错误: {first_line[:50]}...")
+            continue
+        
+        # 解析数据行
+        samples = []
+        for line in lines[1:]:
+            line = line.strip()
+            if not line:
+                continue
+            
+            try:
+                # 解析任意维度数据格式: x1,x2,x3,...,y
+                parts = line.split(',')
+                if len(parts) >= 2:  # 至少要有x变量和y值
+                    # 最后一个值是y，前面的都是x变量
+                    x_values = [float(part) for part in parts[:-1]]
+                    y_value = float(parts[-1])
+                    
+                    samples.append((x_values, y_value))
+                else:
+                    print(f"    数据格式错误: {line}")
+            except (ValueError, IndexError) as e:
+                print(f"    解析数据失败: {line} (错误: {e})")
+                continue
+        
+        if expression and samples:
+            datasets.append({
+                'expression': expression,
+                'samples': samples
+            })
+            # print(f"  加载表达式: {expression[:50]}... 样本数: {len(samples)}")
+        else:
+            print(f"  文件 {file_name} 无有效数据")
+    
+    print(f"成功加载 {len(datasets)} 个表达式数据\n")
+    return datasets
+    
 def load_pretrained_models(
     pretrained_dir: str,
     device: str = 'cpu'
@@ -217,12 +208,7 @@ def main():
     stats = finetune_loop.get_statistics()
     print("\n" + "=" * 60)
     print("在线微调完成")
-    print("=" * 60)
-    print(f"最终难负样本池大小: {stats['hard_negative_pool_size']}")
-    print(f"总共发现难负样本数: {stats['hard_negatives_found']}")
-    print(f"最佳验证奖励: {stats['best_reward']:.4f}")
     print(f"模型已保存到: {final_model_path}")
-    print("=" * 60 + "\n")
 
     # 保存训练历史
     import json

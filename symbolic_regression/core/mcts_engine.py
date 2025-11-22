@@ -336,7 +336,7 @@ class MCTSEngine:
             self.statistics['total_iterations'] += 1
             self.statistics['total_simulations'] += 1
 
-        return best_expression
+        return best_expression,best_reward
 
     def _select_node(self, root: MCTSNode) -> MCTSNode:
         """选择步骤：使用UCB选择最佳节点"""

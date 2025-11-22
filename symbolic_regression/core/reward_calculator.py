@@ -31,8 +31,17 @@ class RewardCalculator:
         self.reward_weights = reward_weights or {
             'structure_alignment': 0.3,
             'data_alignment': 0.4,
-            'accuracy': 0.3
+            'accuracy': 0.3,
+            'complexity': 0.05,
+            'stability': 0.05
         }
+        
+        # 归一化权重确保总和为1（除了complexity和stability是惩罚项）
+        main_weights = ['structure_alignment', 'data_alignment', 'accuracy']
+        main_sum = sum(self.reward_weights[w] for w in main_weights)
+        if main_sum > 0:
+            for w in main_weights:
+                self.reward_weights[w] /= main_sum
         
         self.temperature = temperature
         self.epsilon = epsilon

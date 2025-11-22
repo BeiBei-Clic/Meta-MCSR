@@ -96,7 +96,7 @@ def load_pysr_datasets(data_dir: str = "data/pysr_datasets") -> Optional[List[Di
                     'expression': expression,
                     'samples': samples
                 })
-                print(f"  加载表达式: {expression[:50]}... 样本数: {len(samples)}")
+                # print(f"  加载表达式: {expression[:50]}... 样本数: {len(samples)}")
             else:
                 print(f"  文件 {file_name} 无有效数据")
         

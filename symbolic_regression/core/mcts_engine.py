@@ -461,16 +461,13 @@ class MCTSEngine:
             expr_embedding = self._get_expression_embedding(expression)
 
             # 计算奖励
-            reward_dict = self._calculate_reward(
+            total_reward, reward_dict = self._calculate_reward(
                 expression,
                 expr_embedding,
                 task_embedding,
                 target_expression,
                 task_data
             )
-
-            # 提取总奖励
-            total_reward = reward_dict.get('total', 0.0)
 
             return total_reward, reward_dict
 
@@ -481,7 +478,7 @@ class MCTSEngine:
                 'data_alignment': 0.0,
                 'structure_alignment': 0.0,
                 'complexity': 0.0,
-                'total': 0.0
+                'stability': 0.0
             }
 
     def _get_expression_embedding(self, expression: str) -> torch.Tensor:
@@ -513,8 +510,12 @@ class MCTSEngine:
         task_embedding: Optional[torch.Tensor],
         target_expression: Optional[str],
         task_data: Optional[Tuple[np.ndarray, np.ndarray]]
-    ) -> Dict[str, float]:
-        """计算复合奖励"""
+    ) -> Tuple[float, Dict[str, float]]:
+        """计算复合奖励
+        
+        Returns:
+            (总奖励, 奖励分解字典)
+        """
         reward_dict = {
             'accuracy': 0.0,
             'data_alignment': 0.0,
@@ -560,9 +561,7 @@ class MCTSEngine:
             if component in reward_dict:
                 total_reward += weight * reward_dict[component]
 
-        reward_dict['total'] = total_reward
-
-        return reward_dict
+        return total_reward, reward_dict
 
     def _evaluate_expression_accuracy(
         self,

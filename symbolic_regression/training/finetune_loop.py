@@ -237,7 +237,7 @@ class OnlineFinetuneLoop:
                 true_expr, X, y = train_tasks[task_idx]
 
                 # 执行MCTS探索
-                best_expr, mcts_reward, _ = self.mcts_engine.search(
+                best_expr = self.mcts_engine.search(
                     task_data=(X, y),
                     target_expression=true_expr,
                     verbose=False
@@ -249,12 +249,13 @@ class OnlineFinetuneLoop:
                 )
 
                 # 计算微调损失
-                triplet_loss, alignment_loss = self._compute_finetune_loss(
+                total_loss, alignment_loss = self._compute_finetune_loss(
                     true_expr, best_expr, X, y
                 )
 
-                # 反向传播
-                total_loss = triplet_loss + self.alignment_loss_weight * alignment_loss
+                # 记录指标
+                epoch_metrics['triplet_loss'] += total_loss.item()
+                epoch_metrics['alignment_loss'] += alignment_loss.item()
 
                 self.optimizer.zero_grad()
                 total_loss.backward()
@@ -269,18 +270,13 @@ class OnlineFinetuneLoop:
                 self.optimizer.step()
 
                 # 记录指标
-                epoch_metrics['triplet_loss'] += triplet_loss.item()
-                epoch_metrics['alignment_loss'] += alignment_loss.item()
                 epoch_metrics['total_loss'] += total_loss.item()
-                epoch_metrics['mcts_reward'] += mcts_reward
                 epoch_metrics['count'] += 1
 
                 # 更新进度条
                 if verbose:
                     pbar.set_postfix({
-                        'Triplet Loss': f"{triplet_loss.item():.4f}",
-                        'Align Loss': f"{alignment_loss.item():.4f}",
-                        'MCTS Reward': f"{mcts_reward:.4f}",
+                        'Total Loss': f"{total_loss.item():.4f}",
                         'Hard Neg Pool': f"{len(self.hard_negative_pool)}"
                     })
 
@@ -353,14 +349,14 @@ class OnlineFinetuneLoop:
             candidate_tensor = candidate_embedding.unsqueeze(0)
             structure_sim = F.cosine_similarity(true_tensor, candidate_tensor).item()
 
-            # 如果结构相似度很高
-            if structure_sim >= self.hard_negative_threshold:
+            # 放宽条件：如果结构相似度中等，且准确度有一定差异
+            if structure_sim >= 0.3:  # 降低阈值，从0.8降到0.3
                 # 计算准确度差异
                 true_r2 = self._evaluate_r2(true_expr, X, y)
                 candidate_r2 = self._evaluate_r2(candidate_expr, X, y)
 
-                # 如果真实解的准确度远高于候选表达式
-                if true_r2 > candidate_r2 + 0.1:  # 至少10%的准确度差异
+                # 放宽准确度差异要求
+                if true_r2 > candidate_r2 + 0.05:  # 从10%降到5%
                     # 添加到难负样本池
                     sample = HardNegativeSample(
                         anchor_expr=true_expr,
@@ -369,6 +365,23 @@ class OnlineFinetuneLoop:
                         data_y=y
                     )
 
+                    self.hard_negative_pool.append(sample)
+                    self.statistics['hard_negatives_found'] += 1
+
+                    # 如果池子还没满，降低阈值逐步收集更多样本
+                    if len(self.hard_negative_pool) < 10:
+                        self.hard_negative_threshold = max(0.1, self.hard_negative_threshold * 0.95)
+
+            # 额外条件：如果候选表达式有中等质量但结构不同，也加入池子
+            elif structure_sim >= 0.1:  # 更低的结构相似度
+                candidate_r2 = self._evaluate_r2(candidate_expr, X, y)
+                if candidate_r2 > 0.5:  # 候选表达式本身有一定质量
+                    sample = HardNegativeSample(
+                        anchor_expr=true_expr,
+                        negative_expr=candidate_expr,
+                        data_X=X,
+                        data_y=y
+                    )
                     self.hard_negative_pool.append(sample)
                     self.statistics['hard_negatives_found'] += 1
 
@@ -433,32 +446,68 @@ class OnlineFinetuneLoop:
 
         # 计算嵌入
         true_embedding = self.expression_encoder.encode(true_expr, training=True)
-        negative_embedding = self.expression_encoder.encode(best_expr, training=True)
+        candidate_embedding = self.expression_encoder.encode(best_expr, training=True)
 
         # 计算数据嵌入
         X_tensor = torch.FloatTensor(X).to(self.device)
         y_tensor = torch.FloatTensor(y).to(self.device)
         data_embedding = self.data_encoder.encode(X_tensor, y_tensor)
 
-        # 真正的正样本是自己（用于三元组损失的公式）
-        positive_embedding = true_embedding
+        # 修复：使用数据嵌入作为正样本
+        # anchor: 真实解表达式 (true_expr)
+        # positive: 数据嵌入 (期望模型生成与数据匹配的表达式)
+        # negative: MCTS候选表达式 (best_expr)
+        positive_embedding = data_embedding
 
         # 计算三元组损失
         # 目标：d(anchor, positive) - d(anchor, negative) + margin > 0
+        # 这鼓励模型生成更接近真实解且符合数据特征的表达式
         triplet_loss = self.triplet_loss(
             anchor=true_embedding,
             positive=positive_embedding,
-            negative=negative_embedding
+            negative=candidate_embedding
         )
 
-        # 计算对齐损失：拉近真实解与数据的嵌入
-        cosine_sim = F.cosine_similarity(
-            true_embedding.unsqueeze(0),
-            data_embedding.unsqueeze(0)
-        )
-        alignment_loss = 1 - cosine_sim  # 1 - cosine_similarity
+        # 计算对齐损失（表达式与数据的对齐程度）
+        alignment_loss = self._compute_alignment_loss(true_expr, X, y)
 
-        return triplet_loss, alignment_loss
+        # 加权组合损失
+        total_loss = triplet_loss + self.alignment_loss_weight * alignment_loss
+
+        # 调试输出（仅在前几步）
+        if self.global_step < 5:
+            self.logger.info(f"Step {self.global_step}:")
+            self.logger.info(f"  Triplet Loss: {triplet_loss.item():.6f}")
+            self.logger.info(f"  Alignment Loss: {alignment_loss.item():.6f}")
+            self.logger.info(f"  Total Loss: {total_loss.item():.6f}")
+            self.logger.info(f"  True Expr: {true_expr}")
+            self.logger.info(f"  Best Expr: {best_expr}")
+
+        return total_loss, alignment_loss
+
+    def _compute_alignment_loss(self, expression: str, X: np.ndarray, y: np.ndarray) -> torch.Tensor:
+        """计算表达式与数据的对齐损失"""
+        try:
+            # 计算表达式嵌入
+            expr_embedding = self.expression_encoder.encode(expression, training=True)
+
+            # 计算数据嵌入
+            X_tensor = torch.FloatTensor(X).to(self.device)
+            y_tensor = torch.FloatTensor(y).to(self.device)
+            data_embedding = self.data_encoder.encode(X_tensor, y_tensor)
+
+            # 计算余弦相似度损失（距离为1 - 相似度）
+            cosine_sim = torch.nn.functional.cosine_similarity(
+                expr_embedding.unsqueeze(0),
+                data_embedding.unsqueeze(0)
+            )
+
+            alignment_loss = 1 - cosine_sim  # 转换为距离
+
+            return alignment_loss
+
+        except Exception:
+            return torch.tensor(0.0, device=self.device)
 
     def _compute_batch_finetune_loss(self, batch_samples: List[HardNegativeSample]) -> Tuple[torch.Tensor, torch.Tensor]:
         """计算批次级别的微调损失"""

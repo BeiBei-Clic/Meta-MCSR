@@ -55,6 +55,16 @@ mcts:
   exploration_constant: 1.4
   simulation_count: 10
   
+  # 缓存管理配置（新增）
+  cache_size_limit: 5000        # 缓存大小限制，超过此值会触发自动清理
+  cache_cleanup_interval: 100   # 缓存清理间隔（按MCTS迭代次数）
+  auto_cleanup_enabled: true    # 是否启用自动缓存清理
+  
+  # GPU内存管理配置
+  gpu_memory_cleanup_interval: 50   # GPU内存清理间隔（迭代次数）
+  gpu_memory_threshold_gb: 2.0     # GPU内存清理阈值（GB）
+  max_gpu_memory_gb: 3.0          # 最大GPU内存使用阈值（GB）
+  
   # 奖励权重
   reward_weights:
     structure_alignment: 0.3  # 结构对齐奖励
@@ -77,11 +87,29 @@ training:
   # 在线微调配置
   online_finetune:
     batch_size: 8
-    learning_rate: 1e-6  # 极低学习率
+    learning_rate: 1e-5  # 稍微提高学习率
     mcts_epochs: 50      # MCTS轮数
     eval_steps: 10       # 每多少轮评估一次
     save_steps: 10       # 每多少轮保存一次
     output_dir: "models_weights/finetuned/"
+    
+    # 难负样本池配置
+    hard_negative_pool_size: 1000
+    hard_negative_threshold: 0.3  # 降低阈值以收集更多样本
+    hard_negative_margin: 0.05    # 准确度差异阈值
+    
+    # 三元组损失配置
+    triplet_margin: 1.0
+    alignment_loss_weight: 0.5
+    
+    # 奖励权重配置（覆盖MCTS配置）
+    reward_weights:
+      accuracy: 0.5
+      data_alignment: 0.3
+      structure_alignment: 0.2
+      complexity: -0.05
+      stability: 0.05
+      rollout_reward: 0.2
 
 # 优化器配置
 optimizer:

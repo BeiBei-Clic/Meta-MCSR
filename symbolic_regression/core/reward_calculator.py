@@ -33,11 +33,16 @@ class RewardCalculator:
             'data_alignment': 0.4,
             'accuracy': 0.3,
             'complexity': 0.05,
-            'stability': 0.05
+            'stability': 0.05,
+            'rollout_reward': 0.2
         }
         
         # 归一化权重确保总和为1（除了complexity和stability是惩罚项）
         main_weights = ['structure_alignment', 'data_alignment', 'accuracy']
+        # 只有当rollout_reward存在时才加入归一化
+        if 'rollout_reward' in self.reward_weights:
+            main_weights.append('rollout_reward')
+        
         main_sum = sum(self.reward_weights[w] for w in main_weights)
         if main_sum > 0:
             for w in main_weights:
@@ -50,7 +55,8 @@ class RewardCalculator:
         self.reward_history = {
             'structure_alignment': [],
             'data_alignment': [],
-            'accuracy': []
+            'accuracy': [],
+            'rollout_reward': []
         }
         self.max_history = 1000
     
@@ -103,6 +109,9 @@ class RewardCalculator:
         rewards['stability'] = self._calculate_stability_reward(
             predicted_values, true_values
         )
+        
+        # 6. Rollout奖励（新增，用于奖励完整的搜索轨迹）
+        rewards['rollout_reward'] = 0.0  # 默认值，具体值由MCTS引擎传入
         
         # 计算加权总奖励
         total_reward = 0.0

@@ -22,40 +22,22 @@ class ExpressionTokenizer:
     def __init__(self, max_length: int = 128):
         self.max_length = max_length
         
-        # 构建词汇表
-        self.vocab = self._build_vocab()
-        self.vocab_size = len(self.vocab)
-        
-        # 特殊token的索引
+        # 特殊token的索引（固定ID，避免冲突）
         self.pad_token_id = 0
         self.unk_token_id = 1
         self.cls_token_id = 2
         self.sep_token_id = 3
         
-        # 重新构建vocab以包含特殊token
-        special_tokens = {
+        # 特殊token定义
+        self.special_tokens = {
             '<PAD>': self.pad_token_id,
             '<UNK>': self.unk_token_id,
             '<CLS>': self.cls_token_id,
             '<SEP>': self.sep_token_id,
-            '<VAR>': self.vocab.get('<VAR>', 10000),
-            '<CONST>': self.vocab.get('<CONST>', 10001), 
-            '<OP>': self.vocab.get('<OP>', 10002),
-            '<FUNC>': self.vocab.get('<FUNC>', 10003),
-            '<LPAREN>': self.vocab.get('<LPAREN>', 10004),
-            '<RPAREN>': self.vocab.get('<RPAREN>', 10005)
         }
         
-        # 重新分配特殊token的索引
-        self.special_tokens = {
-            '<PAD>': 0,
-            '<UNK>': 1,
-            '<CLS>': 2,
-            '<SEP>': 3
-        }
-        
-        # 合并特殊token到主vocab
-        self.vocab.update(self.special_tokens)
+        # 构建词汇表
+        self.vocab = self._build_vocab()
         self.vocab_size = len(self.vocab)
         
         # 创建反向词汇表
@@ -80,10 +62,15 @@ class ExpressionTokenizer:
         
         # 构建词汇表
         vocab = {}
-        token_list = operators + functions + variables + additional_variables + special
         
+        # 首先添加特殊token到词汇表（使用固定ID）
+        for token, token_id in self.special_tokens.items():
+            vocab[token] = token_id
+        
+        # 其他token从ID 4开始分配
+        token_list = operators + functions + variables + additional_variables
         for i, token in enumerate(token_list):
-            vocab[token] = i
+            vocab[token] = i + 4  # 从ID 4开始分配
             
         return vocab
         

@@ -492,7 +492,8 @@ class OnlineFinetuneLoop:
         losses = [self._compute_finetune_loss(s.anchor_expr, s.negative_expr, s.data_X, s.data_y)
                  for s in batch_samples]
 
-        triplet_losses, alignment_losses = zip(*losses)
+        triplet_losses = losses
+        alignment_losses = [0.0] * len(losses)  # alignment loss not used currently
 
         return sum(triplet_losses) / len(batch_samples), sum(alignment_losses) / len(batch_samples)
 

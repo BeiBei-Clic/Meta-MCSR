@@ -24,79 +24,13 @@ from symbolic_regression.models.data_encoder import DataEncoder
 from symbolic_regression.training.finetune_loop import OnlineFinetuneLoop
 from symbolic_regression.core.reward_calculator import RewardCalculator
 from symbolic_regression.utils.config_utils import load_config
+from symbolic_regression.utils.data_loader import load_pysr_data
 
 
 
 
 
-def load_pysr_datasets(data_dir: str = "data/pysr_datasets") -> Optional[List[Dict[str, Any]]]:
-    """加载PySR格式的数据集"""
-    if not os.path.exists(data_dir):
-        print(f"错误：数据路径 {data_dir} 不存在")
-        return None
 
-    # 读取所有txt文件
-    datasets = []
-    txt_files = sorted([f for f in os.listdir(data_dir) if f.endswith('.txt')])
-    
-    print(f"在目录 {data_dir} 中找到 {len(txt_files)} 个数据文件")
-    
-    if len(txt_files) == 0:
-        print("没有找到数据文件")
-        return None
-    
-    # 处理所有文件
-    for file_name in txt_files:
-        file_path = os.path.join(data_dir, file_name)
-        
-        with open(file_path, 'r', encoding='utf-8') as f:
-            lines = f.readlines()
-        
-        if len(lines) < 2:
-            print(f"  文件 {file_name} 内容不足，跳过")
-            continue
-        
-        # 解析第一行的表达式
-        first_line = lines[0].strip()
-        if first_line.startswith('表达式: '):
-            expression = first_line.replace('表达式: ', '').strip()
-        else:
-            print(f"  文件 {file_name} 第一行格式错误: {first_line[:50]}...")
-            continue
-        
-        # 解析数据行
-        samples = []
-        for line in lines[1:]:
-            line = line.strip()
-            if not line:
-                continue
-            
-            try:
-                # 解析任意维度数据格式: x1,x2,x3,...,y
-                parts = line.split(',')
-                if len(parts) >= 2:  # 至少要有x变量和y值
-                    # 最后一个值是y，前面的都是x变量
-                    x_values = [float(part) for part in parts[:-1]]
-                    y_value = float(parts[-1])
-                    
-                    samples.append((x_values, y_value))
-                else:
-                    print(f"    数据格式错误: {line}")
-            except (ValueError, IndexError) as e:
-                print(f"    解析数据失败: {line} (错误: {e})")
-                continue
-        
-        if expression and samples:
-            datasets.append({
-                'expression': expression,
-                'samples': samples
-            })
-            # print(f"  加载表达式: {expression[:50]}... 样本数: {len(samples)}")
-        else:
-            print(f"  文件 {file_name} 无有效数据")
-    
-    print(f"成功加载 {len(datasets)} 个表达式数据\n")
-    return datasets
     
 def load_pretrained_models(
     pretrained_dir: str,
@@ -154,7 +88,7 @@ def main():
     expression_encoder, data_encoder = load_pretrained_models(pretrained_dir, device)
 
     # 加载PySR数据集
-    datasets = load_pysr_datasets("data/pysr_datasets")
+    datasets = load_pysr_data("data/pysr_datasets")
     
     if datasets is None:
         print("错误：无法加载数据集，程序退出")
@@ -166,7 +100,7 @@ def main():
         expression = dataset['expression']
         samples = dataset['samples']
         
-        # 转换为numpy数组格式
+        # samples已经是(x_values, y_value)的元组列表
         X = np.array([sample[0] for sample in samples])
         y = np.array([sample[1] for sample in samples])
         

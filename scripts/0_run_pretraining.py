@@ -23,7 +23,7 @@ sys.path.insert(0, str(project_root))
 from symbolic_regression.models.expression_encoder import ExpressionEncoder
 from symbolic_regression.models.data_encoder import DataEncoder
 from symbolic_regression.training.pretrain_pipeline import PretrainPipeline
-from symbolic_regression.utils.data_loader import DataLoader
+from symbolic_regression.utils.data_loader import DataLoader, load_pysr_data
 from symbolic_regression.utils.config_utils import load_config
 
 
@@ -45,89 +45,7 @@ def setup_logging():
     )
 
 
-def load_pretrain_data(pretrain_data_path: str = "data/pysr_datasets"):
-    """加载PySR格式的预训练数据"""
-    if not os.path.exists(pretrain_data_path):
-        print(f"预训练数据路径 {pretrain_data_path} 不存在，开始自动生成数据...")
-        pysr_generate_script_path = os.path.join(project_root, 'scripts', 'generate_pretrain_data_PySR.py')
-        result = subprocess.run([sys.executable, pysr_generate_script_path], 
-                               capture_output=True, text=True, cwd=str(project_root))
-        if result.returncode != 0:
-            print(f"PySR数据生成失败: {result.stderr}")
-            return None
-    
-    # 目录处理
-    if os.path.isdir(pretrain_data_path):
-        pretrain_data = []
-        txt_files = [f for f in os.listdir(pretrain_data_path) if f.endswith('.txt')]
-        
-        for file_name in txt_files:
-            file_path = os.path.join(pretrain_data_path, file_name)
-            with open(file_path, 'r', encoding='utf-8') as f:
-                lines = f.readlines()
-            
-            if len(lines) < 2:
-                continue
-            
-            current_expression = lines[0].replace('表达式: ', '').strip()
-            samples = []
-            
-            for line in lines[1:]:
-                line = line.strip()
-                if not line:
-                    continue
-                    
-                parts = line.split(',')
-                if len(parts) >= 2:
-                    x_values = [float(part) for part in parts[:-1]]
-                    y_value = float(parts[-1])
-                    
-                    sample = {'y': y_value}
-                    for i, x_val in enumerate(x_values, 1):
-                        sample[f'x{i}'] = x_val
-                    samples.append(sample)
-            
-            if samples:
-                variables = [key for key in sorted(samples[0].keys()) if key.startswith('x')]
-                pretrain_data.append({
-                    'expression': current_expression,
-                    'samples': samples,
-                    'variables': variables
-                })
-        
-        return pretrain_data if pretrain_data else None
-    
-    # 单文件处理
-    else:
-        with open(pretrain_data_path, 'r', encoding='utf-8') as f:
-            lines = f.readlines()
-        
-        if len(lines) < 2:
-            return None
-        
-        expression = lines[0].replace('表达式: ', '').strip()
-        samples = []
-        
-        for line in lines[1:]:
-            line = line.strip()
-            if not line:
-                continue
-            
-            parts = line.split(',')
-            if len(parts) >= 2:
-                x_values = [float(part) for part in parts[:-1]]
-                y_value = float(parts[-1])
-                
-                sample = {'y': y_value}
-                for i, x_val in enumerate(x_values, 1):
-                    sample[f'x{i}'] = x_val
-                samples.append(sample)
-        
-        if samples:
-            variables = [f'x{i}' for i in range(1, len(samples[0]))]
-            return [{'expression': expression, 'samples': samples, 'variables': variables}]
-        
-        return None
+
 
 def convert_pysr_data_to_pretrain_format(pysr_data: List[Dict[str, Any]]) -> Tuple[List[str], List[Tuple[np.ndarray, np.ndarray]]]:
     """将PySR格式数据转换为预训练格式"""
@@ -139,10 +57,9 @@ def convert_pysr_data_to_pretrain_format(pysr_data: List[Dict[str, Any]]) -> Tup
         if len(samples) == 0:
             continue
             
-        # 简单处理x变量
-        x_variables = [f'x{i}' for i in range(1, len(samples[0]))]
-        X = np.array([[sample[var] for var in x_variables] for sample in samples]).astype(np.float32)
-        y = np.array([sample['y'] for sample in samples]).astype(np.float32)
+        # samples是(x_values, y_value)的元组列表
+        X = np.array([sample[0] for sample in samples]).astype(np.float32)
+        y = np.array([sample[1] for sample in samples]).astype(np.float32)
         
         expressions.append(item['expression'])
         datasets.append((X, y))
@@ -180,7 +97,7 @@ def main():
     )
     
     # 加载和处理数据
-    pysr_data = load_pretrain_data("data/pysr_datasets")
+    pysr_data = load_pysr_data("data/pysr_datasets", auto_generate=True)
     if not pysr_data:
         print("无法加载预训练数据")
         return 1

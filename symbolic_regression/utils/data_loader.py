@@ -8,6 +8,9 @@ import numpy as np
 import pandas as pd
 from typing import Dict, List, Optional, Tuple, Union, Any
 import os
+import subprocess
+import sys
+from pathlib import Path
 from sklearn.preprocessing import StandardScaler, MinMaxScaler
 from sklearn.model_selection import train_test_split
 
@@ -494,6 +497,73 @@ class DataLoader:
         
         return dataset
     
+    def load_pysr_data(
+        self, 
+        data_source: str,
+        auto_generate: bool = False
+    ) -> Optional[List[Dict[str, Any]]]:
+        """
+        统一加载PySR格式数据的函数
+        
+        支持文件或目录路径，解析包含表达式和数据样本的txt文件
+        
+        Args:
+            data_source: 数据路径（文件或目录）
+            auto_generate: 如果数据不存在是否自动生成
+            
+        Returns:
+            数据字典列表，每个包含'expression'和'samples'键
+        """
+        if not os.path.exists(data_source):
+            if auto_generate:
+                print(f"数据路径不存在，开始生成数据...")
+                # 获取项目根目录
+                project_root = Path(__file__).parent.parent.parent
+                generate_script = os.path.join(project_root, 'scripts', 'generate_pretrain_data_PySR.py')
+                subprocess.run([sys.executable, generate_script], cwd=str(project_root))
+            else:
+                return None
+        
+        datasets = []
+        
+        # 获取所有txt文件
+        if os.path.isdir(data_source):
+            txt_files = [f for f in os.listdir(data_source) if f.endswith('.txt')]
+            file_paths = [os.path.join(data_source, f) for f in txt_files]
+        else:
+            file_paths = [data_source]
+        
+        for file_path in file_paths:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                lines = f.readlines()
+            
+            if len(lines) < 2:
+                continue
+            
+            # 解析表达式
+            expression = lines[0].replace('表达式: ', '').strip()
+            
+            # 解析数据行
+            samples = []
+            for line in lines[1:]:
+                line = line.strip()
+                if not line:
+                    continue
+                
+                parts = line.split(',')
+                if len(parts) >= 2:
+                    x_values = [float(part) for part in parts[:-1]]
+                    y_value = float(parts[-1])
+                    samples.append((x_values, y_value))
+            
+            if expression and samples:
+                datasets.append({
+                    'expression': expression,
+                    'samples': samples
+                })
+        
+        return datasets
+
     def generate_synthetic_data(
         self,
         expression: str,
@@ -606,3 +676,21 @@ def generate_data(
     """
     loader = DataLoader()
     return loader.generate_synthetic_data(expression, n_samples, **kwargs)
+
+
+def load_pysr_data(
+    data_source: str,
+    auto_generate: bool = False
+) -> Optional[List[Dict[str, Any]]]:
+    """
+    快速加载PySR格式数据
+    
+    Args:
+        data_source: 数据路径（文件或目录）
+        auto_generate: 如果数据不存在是否自动生成
+        
+    Returns:
+        数据字典列表
+    """
+    loader = DataLoader()
+    return loader.load_pysr_data(data_source, auto_generate)

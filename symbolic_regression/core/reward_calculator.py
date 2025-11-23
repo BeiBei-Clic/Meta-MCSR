@@ -146,6 +146,9 @@ class RewardCalculator:
             # 余弦相似度
             cosine_sim = F.cosine_similarity(expr_tensor, data_tensor).item()
 
+            # 清理临时张量
+            del expr_tensor, data_tensor
+
             # 转换为奖励（0-1范围）
             alignment_reward = max(0, (cosine_sim + 1) / 2)
 
@@ -178,6 +181,9 @@ class RewardCalculator:
             target_tensor = torch.FloatTensor(target_expr_embedding).unsqueeze(0)
 
             cosine_sim = F.cosine_similarity(expr_tensor, target_tensor).item()
+
+            # 清理临时张量
+            del expr_tensor, target_tensor
 
             # 转换为奖励（0-1范围）
             structure_reward = max(0, (cosine_sim + 1) / 2)

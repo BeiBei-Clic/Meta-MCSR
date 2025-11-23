@@ -241,24 +241,11 @@ class MCTSEngine:
             "log(x{i}^2 + x{j}^2) + x{i}",
         ])
 
-        # 缓存
-        self.embedding_cache = {}  # 缓存表达式嵌入
-        self.expr_cache = {}  # 缓存表达式计算结果
-
-        # 缓存清理配置
-        self.cache_size_limit = config.get('cache_size_limit', 5000)  # 缓存大小限制
-        self.cache_cleanup_interval = config.get('cache_cleanup_interval', 100)  # 清理间隔（迭代次数）
-        self.last_cache_cleanup = 0  # 上次清理时的迭代计数
-        self.auto_cleanup_enabled = config.get('auto_cleanup_enabled', True)  # 是否启用自动清理
-
         # 统计信息
         self.statistics = {
             'total_iterations': 0,
             'total_simulations': 0,
             'unique_expressions': 0,
-            'cache_hits': 0,
-            'cache_misses': 0,
-            'cache_cleanups': 0,  # 缓存清理次数
             'gpu_memory_peak': 0,  # GPU内存峰值
             'gpu_cache_cleanups': 0,  # GPU缓存清理次数
         }
@@ -705,7 +692,7 @@ class MCTSEngine:
         return False
 
     def _get_expression_embedding(self, expression: str) -> torch.Tensor:
-        """获取表达式嵌入（带缓存和GPU内存优化）"""
+        """获取表达式嵌入"""
         try:
             # 计算嵌入
             if self.freeze_encoders:
@@ -715,7 +702,6 @@ class MCTSEngine:
             else:
                 embedding = self.expression_encoder.encode(expression, training=True)
 
-            self.embedding_cache[expression] = embedding
             return embedding
 
         except Exception as e:
@@ -725,9 +711,13 @@ class MCTSEngine:
                 self.expression_encoder.eval()
                 with torch.no_grad():
                     zero_embedding = torch.zeros(512, dtype=torch.float32)
+                    if self.device == 'cuda':
+                        zero_embedding = zero_embedding.cuda()
                     return zero_embedding
             else:
                 zero_embedding = torch.zeros(512, dtype=torch.float32)
+                if self.device == 'cuda':
+                    zero_embedding = zero_embedding.cuda()
                 return zero_embedding
 
     def _calculate_reward(
@@ -863,11 +853,6 @@ class MCTSEngine:
     ) -> float:
         """评估表达式的准确度（R²分数）"""
         try:
-            # 检查缓存
-            cache_key = f"{expression}_{hash(str(X.shape))}_{hash(str(y.shape))}"
-            if cache_key in self.expr_cache:
-                return self.expr_cache[cache_key]
-
             # 安全求值
             y_pred = self._safe_eval_expression(expression, X)
 
@@ -890,10 +875,6 @@ class MCTSEngine:
                         # 确保r2_ratio在合理范围内
                         r2_ratio = np.clip(r2_ratio, 0, 1e6)
                         r2_score = 1 - r2_ratio
-
-            # 缓存结果
-            if len(self.expr_cache) < 10000:  # 防止缓存过大
-                self.expr_cache[cache_key] = r2_score
 
             return r2_score
 
@@ -1004,178 +985,3 @@ class MCTSEngine:
         while current is not None:
             current.update(reward, reward_breakdown)
             current = current.parent
-
-    def _print_statistics(self):
-        """打印搜索统计信息"""
-        print("\n=== MCTS搜索统计 ===")
-        
-        # 基础统计信息
-        basic_stats = ['total_iterations', 'total_simulations', 'unique_expressions', 
-                      'cache_hits', 'cache_misses', 'cache_cleanups']
-        for key in basic_stats:
-            if key in self.statistics:
-                print(f"{key}: {self.statistics[key]}")
-        
-        # 缓存统计
-        cache_hit_rate = self.statistics['cache_hits'] / max(1, self.statistics['cache_hits'] + self.statistics['cache_misses'])
-        print(f"缓存命中率: {cache_hit_rate:.2%}")
-        print(f"当前缓存大小: {len(self.embedding_cache)}")
-        
-        # GPU内存统计
-        if torch.cuda.is_available():
-            current_allocated = torch.cuda.memory_allocated()
-            current_reserved = torch.cuda.memory_reserved()
-            peak_allocated = torch.cuda.max_memory_allocated()
-            
-            print(f"当前GPU已分配内存: {current_allocated / 1e6:.1f} MB")
-            print(f"当前GPU保留内存: {current_reserved / 1e6:.1f} MB") 
-            print(f"峰值GPU内存: {peak_allocated / 1e6:.1f} MB")
-            print(f"GPU缓存清理次数: {self.statistics['gpu_cache_cleanups']}")
-            
-            # 更新峰值统计
-            if peak_allocated > self.statistics.get('gpu_memory_peak', 0):
-                self.statistics['gpu_memory_peak'] = peak_allocated
-        else:
-            print("未检测到GPU设备")
-        
-        print("=====================\n")
-
-    def _auto_cleanup_cache(self):
-        """智能自动清理缓存以释放GPU内存"""
-        if not self.auto_cleanup_enabled:
-            return
-
-        initial_size = len(self.embedding_cache)
-        
-        # GPU内存使用情况检查
-        gpu_memory_info = {}
-        if torch.cuda.is_available():
-            gpu_memory_info = {
-                'allocated': torch.cuda.memory_allocated(),
-                'reserved': torch.cuda.memory_reserved(),
-                'max_allocated': torch.cuda.max_memory_allocated()
-            }
-
-        # 智能清理策略
-        needs_cleanup = False
-        cleanup_reasons = []
-
-        # 策略1：缓存大小超限
-        if initial_size > self.cache_size_limit:
-            needs_cleanup = True
-            cleanup_reasons.append(f"缓存过大({initial_size}>{self.cache_size_limit})")
-
-        # 策略2：GPU内存使用超限（超过2GB）
-        if gpu_memory_info.get('allocated', 0) > 2e9:
-            needs_cleanup = True
-            cleanup_reasons.append(f"GPU内存过多({gpu_memory_info['allocated']/1e9:.1f}GB)")
-
-        # 策略3：GPU内存保留过多（超过3GB）
-        if gpu_memory_info.get('reserved', 0) > 3e9:
-            needs_cleanup = True
-            cleanup_reasons.append(f"GPU保留过多({gpu_memory_info['reserved']/1e9:.1f}GB)")
-
-        if needs_cleanup:
-            # 计算清理目标
-            if initial_size > self.cache_size_limit:
-                target_size = min(self.cache_size_limit // 2, initial_size - 100)
-            else:
-                target_size = max(100, initial_size // 2)  # 至少保留100项
-
-            items_to_remove = initial_size - target_size
-            
-            # 智能选择删除的缓存项（优先删除GPU上的项）
-            cache_keys = list(self.embedding_cache.keys())
-            gpu_keys = [k for k in cache_keys if self.embedding_cache[k].is_cuda]
-            cpu_keys = [k for k in cache_keys if not self.embedding_cache[k].is_cuda]
-            
-            # 优先删除GPU缓存项，然后是CPU缓存项
-            keys_to_remove = []
-            if gpu_keys:
-                keys_to_remove.extend(gpu_keys[:min(len(gpu_keys), items_to_remove)])
-                items_to_remove -= len(keys_to_remove)
-            
-            if items_to_remove > 0 and cpu_keys:
-                keys_to_remove.extend(cpu_keys[:min(len(cpu_keys), items_to_remove)])
-            
-            # 执行清理
-            for key in keys_to_remove:
-                cached_item = self.embedding_cache.pop(key, None)
-                # 立即释放GPU内存
-                if cached_item is not None and cached_item.is_cuda:
-                    del cached_item
-                
-                # 清理表达式计算缓存
-                keys_to_remove_expr = [k for k in self.expr_cache.keys() if k.startswith(key)]
-                for expr_key in keys_to_remove_expr:
-                    self.expr_cache.pop(expr_key, None)
-
-            # 清理后的GPU内存释放
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-                self.statistics['gpu_cache_cleanups'] += 1
-
-            # 更新统计信息
-            self.statistics['cache_cleanups'] += 1
-            self.last_cache_cleanup = self.statistics['total_iterations']
-            
-            final_size = len(self.embedding_cache)
-            reason_str = ", ".join(cleanup_reasons)
-            print(f"[Auto Cleanup] 原因: {reason_str} | 清理缓存: {initial_size} -> {final_size} 项", flush=True)
-            
-            # 显示GPU内存使用情况
-            if torch.cuda.is_available():
-                gpu_memory_after = {
-                    'allocated': torch.cuda.memory_allocated(),
-                    'reserved': torch.cuda.memory_reserved(),
-                }
-                freed_allocated = gpu_memory_info['allocated'] - gpu_memory_after['allocated']
-                freed_reserved = gpu_memory_info['reserved'] - gpu_memory_after['reserved']
-                print(f"[GPU Memory] 释放已分配: {freed_allocated/1e6:.1f}MB, 释放保留: {freed_reserved/1e6:.1f}MB", flush=True)
-
-    def reset_cache(self):
-        """重置缓存"""
-        # 清空GPU缓存中的张量
-        for key, embedding in list(self.embedding_cache.items()):
-            if hasattr(embedding, 'is_cuda') and embedding.is_cuda:
-                del embedding
-        
-        # 清空CPU缓存中的张量
-        for key, embedding in list(self.embedding_cache.items()):
-            if hasattr(embedding, 'cpu'):
-                del embedding
-                
-        self.embedding_cache.clear()
-        self.expr_cache.clear()
-        
-        # 重置统计信息
-        self.statistics['cache_hits'] = 0
-        self.statistics['cache_misses'] = 0
-        self.statistics['cache_cleanups'] = 0
-        self.statistics['gpu_cache_cleanups'] = 0
-        self.last_cache_cleanup = 0
-        
-        # 释放GPU内存
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-            torch.cuda.reset_peak_memory_stats()
-            print("[Cache Reset] 缓存和GPU内存已重置", flush=True)
-
-    def get_search_tree_info(self, root: MCTSNode) -> Dict[str, Any]:
-        """获取搜索树信息"""
-        def collect_info(node: MCTSNode) -> Dict[str, Any]:
-            info = {
-                'expression': node.expression,
-                'depth': node.depth,
-                'visits': node.visits,
-                'value': node.total_reward,
-                'reward_breakdown': node.reward_breakdown,
-                'children': []
-            }
-
-            for child in node.children:
-                info['children'].append(collect_info(child))
-
-            return info
-
-        return collect_info(root)

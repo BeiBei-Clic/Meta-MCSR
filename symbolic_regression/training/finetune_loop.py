@@ -332,6 +332,10 @@ class OnlineFinetuneLoop:
             self.statistics['hard_negatives_found'] += 0  # 实际计数在_check_and_add_hard_negative中
             self.global_step += 1
 
+            # 清理GPU内存（每个epoch结束后）
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
         pbar.close() if verbose else None
 
         self.logger.info("在线微调完成！")
@@ -477,6 +481,11 @@ class OnlineFinetuneLoop:
             self.logger.info(f"  True Expr: {true_expr}")
             self.logger.info(f"  Best Expr: {best_expr}")
 
+        # 在返回前清理不再需要的GPU张量（除了损失张量本身）
+        # 注意：不能清理true_embedding, candidate_embedding, positive_embedding等，
+        # 因为它们仍然被triplet_loss的计算图引用，需要用于反向传播
+        del X_tensor, y_tensor
+
         return triplet_loss
 
     def _compute_alignment_loss(self, expression: str, X: np.ndarray, y: np.ndarray) -> torch.Tensor:
@@ -497,6 +506,9 @@ class OnlineFinetuneLoop:
             )
 
             alignment_loss = 1 - cosine_sim  # 转换为距离
+
+            # 清理不再需要的张量（但保留用于反向传播的嵌入）
+            del X_tensor, y_tensor
 
             return alignment_loss
 
@@ -522,6 +534,9 @@ class OnlineFinetuneLoop:
             total_triplet_loss += triplet_loss
             total_alignment_loss += alignment_loss
 
+            # 处理完每个样本后，清理GPU内存（保留损失张量）
+            del triplet_loss, alignment_loss
+
         # 计算平均损失
         avg_triplet_loss = total_triplet_loss / len(batch_samples)
         avg_alignment_loss = total_alignment_loss / len(batch_samples)
@@ -539,7 +554,7 @@ class OnlineFinetuneLoop:
         with torch.no_grad():
             for true_expr, X, y in val_tasks:
                 # 执行MCTS搜索
-                best_expr, mcts_reward = self.mcts_engine.search(
+                best_expr, mcts_reward_dict, mcts_reward = self.mcts_engine.search(
                     task_data=(X, y),
                     target_expression=true_expr,
                     verbose=False
@@ -547,6 +562,10 @@ class OnlineFinetuneLoop:
 
                 total_reward += mcts_reward
                 total_count += 1
+
+            # 清理GPU内存（验证结束后）
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
         avg_reward = total_reward / max(1, total_count)
 
@@ -597,6 +616,11 @@ class OnlineFinetuneLoop:
             self.optimizer.step()
 
             total_triplet_loss += triplet_loss.item()
+
+            # 清理GPU内存（每个epoch后）
+            del total_loss, triplet_loss
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
         avg_triplet_loss = total_triplet_loss / epochs
 

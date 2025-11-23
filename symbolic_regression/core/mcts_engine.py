@@ -443,71 +443,42 @@ class MCTSEngine:
         task_data: Optional[Tuple[np.ndarray, np.ndarray]]
     ) -> Tuple[float, Dict[str, float]]:
         """模拟步骤：通过rollout评估表达式的奖励"""
-        # 跟踪所有GPU张量以便彻底清理
-        gpu_tensors_to_cleanup = []
-        X_tensor = None
-        y_tensor = None
+        if task_data:
+            X, y = task_data
+            feature_count = X.shape[1]
+        else:
+            feature_count = 3
 
-        try:
-            # 提取特征数用于rollout
-            feature_count = 3  # 默认值
-            if task_data is not None:
-                X, y = task_data
-                feature_count = X.shape[1]
+        local_task_embedding = task_embedding
+        if task_embedding is None and task_data is not None:
+            X_tensor = torch.FloatTensor(X).to(self.device)
+            y_tensor = torch.FloatTensor(y).to(self.device)
 
-            # 如果没有提供task_embedding，则计算（仅在必要时）
-            local_task_embedding = task_embedding
-            if task_embedding is None and task_data is not None:
-                X_tensor = torch.FloatTensor(X).to(self.device)
-                y_tensor = torch.FloatTensor(y).to(self.device)
-                gpu_tensors_to_cleanup.extend([X_tensor, y_tensor])
-
-                if self.freeze_encoders:
-                    self.expression_encoder.eval()
-                    self.data_encoder.eval()
-                    with torch.no_grad():
-                        local_task_embedding = self.data_encoder.encode(X_tensor, y_tensor)
-                else:
+            if self.freeze_encoders:
+                self.data_encoder.eval()
+                with torch.no_grad():
                     local_task_embedding = self.data_encoder.encode(X_tensor, y_tensor)
+            else:
+                local_task_embedding = self.data_encoder.encode(X_tensor, y_tensor)
 
-                gpu_tensors_to_cleanup.append(local_task_embedding)
+        rollout_expression, rollout_path = self._rollout(
+            expression,
+            remaining_depth=self.max_depth - self._get_expression_depth(expression),
+            feature_count=feature_count
+        )
 
-            # 执行rollout：从当前表达式开始随机扩展
-            rollout_expression, rollout_path = self._rollout(
-                expression,
-                remaining_depth=self.max_depth - self._get_expression_depth(expression),
-                feature_count=feature_count
-            )
+        expr_embedding = self._get_expression_embedding(rollout_expression)
 
-            # 计算最终表达式嵌入
-            expr_embedding = self._get_expression_embedding(rollout_expression)
-            gpu_tensors_to_cleanup.append(expr_embedding)
+        total_reward, reward_dict = self._calculate_reward(
+            rollout_expression,
+            expr_embedding,
+            local_task_embedding,
+            target_expression,
+            task_data,
+            rollout_path=rollout_path
+        )
 
-            # 计算奖励（包含rollout路径奖励）
-            total_reward, reward_dict = self._calculate_reward(
-                rollout_expression,
-                expr_embedding,
-                local_task_embedding,
-                target_expression,
-                task_data,
-                rollout_path=rollout_path  # 传递rollout路径
-            )
-
-            return total_reward, reward_dict
-
-        finally:
-            # 彻底清理所有GPU张量
-            for tensor in gpu_tensors_to_cleanup:
-                if tensor is not None and hasattr(tensor, 'is_cuda') and tensor.is_cuda:
-                    try:
-                        del tensor
-                    except RuntimeError:
-                        # 张量可能已经被删除
-                        pass
-
-            # 清理GPU缓存
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
+        return total_reward, reward_dict
 
 
     def _rollout(self, start_expression: str, remaining_depth: int, feature_count: int = 3) -> Tuple[str, List[str]]:
@@ -693,32 +664,11 @@ class MCTSEngine:
 
     def _get_expression_embedding(self, expression: str) -> torch.Tensor:
         """获取表达式嵌入"""
-        try:
-            # 计算嵌入
-            if self.freeze_encoders:
-                self.expression_encoder.eval()
-                with torch.no_grad():
-                    embedding = self.expression_encoder.encode(expression, training=False)
-            else:
-                embedding = self.expression_encoder.encode(expression, training=True)
-
-            return embedding
-
-        except Exception as e:
-            print(f"警告: 计算嵌入失败 {expression}: {e}")
-            # 返回零张量
-            if self.freeze_encoders:
-                self.expression_encoder.eval()
-                with torch.no_grad():
-                    zero_embedding = torch.zeros(512, dtype=torch.float32)
-                    if self.device == 'cuda':
-                        zero_embedding = zero_embedding.cuda()
-                    return zero_embedding
-            else:
-                zero_embedding = torch.zeros(512, dtype=torch.float32)
-                if self.device == 'cuda':
-                    zero_embedding = zero_embedding.cuda()
-                return zero_embedding
+        if self.freeze_encoders:
+            self.expression_encoder.eval()
+            with torch.no_grad():
+                return self.expression_encoder.encode(expression, training=False)
+        return self.expression_encoder.encode(expression, training=True)
 
     def _calculate_reward(
         self,
@@ -751,35 +701,18 @@ class MCTSEngine:
             )
 
         # 2. 结构对齐奖励（仅在微调阶段使用）
-        target_embedding = None  # 确保变量存在
         if target_expression is not None:
-            try:
-                # 使用GPU内存优化模式获取目标嵌入
-                target_embedding = self._get_expression_embedding(target_expression)
-
-                reward_dict['structure_alignment'] = self.reward_calculator._calculate_structure_alignment_reward(
-                    expr_embedding.detach().cpu().numpy(),
-                    target_embedding.detach().numpy()
-                )
-
-            except Exception:
-                reward_dict['structure_alignment'] = 0.0
-            finally:
-                # 确保清理target_embedding
-                if target_embedding is not None and target_embedding.is_cuda:
-                    try:
-                        del target_embedding
-                    except:
-                        pass
+            target_embedding = self._get_expression_embedding(target_expression)
+            reward_dict['structure_alignment'] = self.reward_calculator._calculate_structure_alignment_reward(
+                expr_embedding.detach().cpu().numpy(),
+                target_embedding.detach().cpu().numpy()
+            )
 
         # 3. 准确度奖励（真实精度）
         if task_data is not None:
             X, y = task_data
-            try:
-                r2_score = self._evaluate_expression_accuracy(expression, X, y)
-                reward_dict['accuracy'] = self.reward_calculator._calculate_accuracy_reward(r2_score)
-            except Exception:
-                reward_dict['accuracy'] = 0.0
+            r2_score = self._evaluate_expression_accuracy(expression, X, y)
+            reward_dict['accuracy'] = self.reward_calculator._calculate_accuracy_reward(r2_score)
 
         # 4. 复杂度惩罚
         complexity = self._calculate_expression_complexity(expression)
@@ -852,34 +785,21 @@ class MCTSEngine:
         y: np.ndarray
     ) -> float:
         """评估表达式的准确度（R²分数）"""
-        try:
-            # 安全求值
-            y_pred = self._safe_eval_expression(expression, X)
+        y_pred = self._safe_eval_expression(expression, X)
 
-            # 检查预测值是否包含无效值
-            if not np.all(np.isfinite(y_pred)):
-                r2_score = -np.inf
-            else:
-                # 使用安全的数值计算
-                with np.errstate(invalid='ignore', over='ignore', under='ignore'):
-                    # 计算R²分数
-                    y_mean = np.mean(y)
-                    ss_res = np.sum((y - y_pred) ** 2)
-                    ss_tot = np.sum((y - y_mean) ** 2)
-
-                    # 避免除零并处理数值问题
-                    if ss_tot <= 1e-10:
-                        r2_score = 0.0 if np.allclose(y_pred, y_mean, atol=1e-6) else -np.inf
-                    else:
-                        r2_ratio = ss_res / ss_tot
-                        # 确保r2_ratio在合理范围内
-                        r2_ratio = np.clip(r2_ratio, 0, 1e6)
-                        r2_score = 1 - r2_ratio
-
-            return r2_score
-
-        except Exception:
+        if not np.all(np.isfinite(y_pred)):
             return -np.inf
+
+        with np.errstate(invalid='ignore', over='ignore', under='ignore'):
+            y_mean = np.mean(y)
+            ss_res = np.sum((y - y_pred) ** 2)
+            ss_tot = np.sum((y - y_mean) ** 2)
+
+            if ss_tot <= 1e-10:
+                return 0.0 if np.allclose(y_pred, y_mean, atol=1e-6) else -np.inf
+
+            r2_ratio = np.clip(ss_res / ss_tot, 0, 1e6)
+            return 1 - r2_ratio
 
     def _safe_eval_expression(self, expression: str, X: np.ndarray) -> np.ndarray:
         """安全地求值表达式"""

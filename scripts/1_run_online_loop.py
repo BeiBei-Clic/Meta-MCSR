@@ -59,16 +59,8 @@ def main():
         sys.exit(1)
     
     # 转换数据格式以适配现有逻辑
-    benchmark_tasks = []
-    for dataset in datasets:
-        expression = dataset['expression']
-        samples = dataset['samples']
-        
-        # samples已经是(x_values, y_value)的元组列表
-        X = np.array([sample[0] for sample in samples])
-        y = np.array([sample[1] for sample in samples])
-        
-        benchmark_tasks.append((expression, X, y))
+    benchmark_tasks = [(d['expression'], np.array([s[0] for s in d['samples']]),
+                       np.array([s[1] for s in d['samples']])) for d in datasets]
     
     print(f"加载了 {len(benchmark_tasks)} 个任务用于在线微调")
 
@@ -107,10 +99,7 @@ def main():
     import json
     history_file = os.path.join(model_dir, 'training_history.json')
     with open(history_file, 'w') as f:
-        json.dump({
-            'train_history': train_history,
-            'final_statistics': stats
-        }, f, indent=2)
+        json.dump({'train_history': train_history, 'final_statistics': stats}, f, indent=2)
 
     print(f"训练历史已保存到: {history_file}\n")
 

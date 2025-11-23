@@ -132,33 +132,13 @@ class RewardCalculator:
         data_embedding: np.ndarray
     ) -> float:
         """计算数据对齐奖励"""
-        try:
-            # 确保输入是张量格式并移动到CPU
-            if isinstance(expr_embedding, torch.Tensor):
-                expr_embedding = expr_embedding.cpu().numpy()
-            if isinstance(data_embedding, torch.Tensor):
-                data_embedding = data_embedding.cpu().numpy()
+        expr_tensor = torch.FloatTensor(expr_embedding).unsqueeze(0)
+        data_tensor = torch.FloatTensor(data_embedding).unsqueeze(0)
 
-            # 计算余弦相似度
-            expr_tensor = torch.FloatTensor(expr_embedding).unsqueeze(0)
-            data_tensor = torch.FloatTensor(data_embedding).unsqueeze(0)
+        cosine_sim = F.cosine_similarity(expr_tensor, data_tensor).item()
 
-            # 余弦相似度
-            cosine_sim = F.cosine_similarity(expr_tensor, data_tensor).item()
-
-            # 清理临时张量
-            del expr_tensor, data_tensor
-
-            # 转换为奖励（0-1范围）
-            alignment_reward = max(0, (cosine_sim + 1) / 2)
-
-            # 应用温度缩放
-            alignment_reward = alignment_reward / self.temperature
-
-            return alignment_reward
-
-        except Exception:
-            return 0.0
+        alignment_reward = max(0, (cosine_sim + 1) / 2)
+        return alignment_reward / self.temperature
     
     def _calculate_structure_alignment_reward(
         self,
@@ -169,29 +149,12 @@ class RewardCalculator:
         if target_expr_embedding is None:
             return 0.0
 
-        try:
-            # 确保输入是张量格式并移动到CPU
-            if isinstance(expr_embedding, torch.Tensor):
-                expr_embedding = expr_embedding.cpu().numpy()
-            if isinstance(target_expr_embedding, torch.Tensor):
-                target_expr_embedding = target_expr_embedding.cpu().numpy()
+        expr_tensor = torch.FloatTensor(expr_embedding).unsqueeze(0)
+        target_tensor = torch.FloatTensor(target_expr_embedding).unsqueeze(0)
 
-            # 计算与真实解的余弦相似度
-            expr_tensor = torch.FloatTensor(expr_embedding).unsqueeze(0)
-            target_tensor = torch.FloatTensor(target_expr_embedding).unsqueeze(0)
+        cosine_sim = F.cosine_similarity(expr_tensor, target_tensor).item()
 
-            cosine_sim = F.cosine_similarity(expr_tensor, target_tensor).item()
-
-            # 清理临时张量
-            del expr_tensor, target_tensor
-
-            # 转换为奖励（0-1范围）
-            structure_reward = max(0, (cosine_sim + 1) / 2)
-
-            return structure_reward
-
-        except Exception:
-            return 0.0
+        return max(0, (cosine_sim + 1) / 2)
     
     def _calculate_accuracy_reward(self, r2_score: float) -> float:
         """计算准确度奖励"""
@@ -255,65 +218,38 @@ class RewardCalculator:
                     self.reward_history[component].pop(0)
     
     def get_normalized_rewards(
-        self, 
-        rewards: Dict[str, float], 
+        self,
+        rewards: Dict[str, float],
         method: str = 'min_max'
     ) -> Dict[str, float]:
-        """
-        归一化奖励值
-        
-        Args:
-            rewards: 原始奖励字典
-            method: 归一化方法 ('min_max', 'z_score', 'percentile')
-            
-        Returns:
-            归一化后的奖励字典
-        """
+        """归一化奖励值"""
         normalized_rewards = {}
-        
+
         for component, value in rewards.items():
             if component == 'total':
                 normalized_rewards[component] = value
                 continue
-                
+
             history = self.reward_history.get(component, [])
             if not history:
                 normalized_rewards[component] = value
                 continue
-            
+
             if method == 'min_max':
-                min_val = min(history)
-                max_val = max(history)
-                if max_val > min_val:
-                    normalized_rewards[component] = (value - min_val) / (max_val - min_val)
-                else:
-                    normalized_rewards[component] = value
-                    
+                min_val, max_val = min(history), max(history)
+                normalized_rewards[component] = (value - min_val) / (max_val - min_val) if max_val > min_val else value
             elif method == 'z_score':
-                mean_val = np.mean(history)
-                std_val = np.std(history)
-                if std_val > self.epsilon:
-                    normalized_rewards[component] = (value - mean_val) / std_val
-                else:
-                    normalized_rewards[component] = value
-                    
+                mean_val, std_val = np.mean(history), np.std(history)
+                normalized_rewards[component] = (value - mean_val) / std_val if std_val > self.epsilon else value
             elif method == 'percentile':
-                percentile_5 = np.percentile(history, 5)
-                percentile_95 = np.percentile(history, 95)
-                if percentile_95 > percentile_5:
-                    normalized_rewards[component] = (value - percentile_5) / (percentile_95 - percentile_5)
-                else:
-                    normalized_rewards[component] = value
+                percentile_5, percentile_95 = np.percentile(history, [5, 95])
+                normalized_rewards[component] = (value - percentile_5) / (percentile_95 - percentile_5) if percentile_95 > percentile_5 else value
             else:
                 normalized_rewards[component] = value
-        
-        # 重新计算总奖励
-        total_reward = 0.0
-        for component, weight in self.reward_weights.items():
-            if component in normalized_rewards:
-                total_reward += weight * normalized_rewards[component]
+
+        total_reward = sum(weight * normalized_rewards.get(comp, 0.0) for comp, weight in self.reward_weights.items())
         normalized_rewards['total'] = total_reward
-        
+
         return normalized_rewards
     
     def get_reward_statistics(self) -> Dict[str, Dict[str, float]]:

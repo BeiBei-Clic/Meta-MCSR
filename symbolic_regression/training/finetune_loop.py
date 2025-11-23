@@ -351,48 +351,29 @@ class OnlineFinetuneLoop:
         target_expr: str
     ):
         """检查候选表达式是否为难负样本，如果是则加入样本池"""
-        true_embedding = None
-        candidate_embedding = None
-        true_tensor = None
-        candidate_tensor = None
+        true_embedding = self.expression_encoder.encode(true_expr, training=False)
+        candidate_embedding = self.expression_encoder.encode(candidate_expr, training=False)
 
-        try:
-            # 计算嵌入
-            true_embedding = self.expression_encoder.encode(true_expr, training=False)
-            candidate_embedding = self.expression_encoder.encode(candidate_expr, training=False)
+        structure_sim = F.cosine_similarity(
+            true_embedding.unsqueeze(0),
+            candidate_embedding.unsqueeze(0)
+        ).item()
 
-            # 计算结构相似度
-            true_tensor = true_embedding.unsqueeze(0)
-            candidate_tensor = candidate_embedding.unsqueeze(0)
-            structure_sim = F.cosine_similarity(true_tensor, candidate_tensor).item()
+        if structure_sim >= 0.5:
+            true_r2 = self._evaluate_r2(true_expr, X, y)
+            candidate_r2 = self._evaluate_r2(candidate_expr, X, y)
 
-            # 放宽条件：如果结构相似度中等，且准确度有一定差异
-            if structure_sim >= 0.5:  # 降低阈值，从0.8降到0.3
-                # 计算准确度差异
-                true_r2 = self._evaluate_r2(true_expr, X, y)
-                candidate_r2 = self._evaluate_r2(candidate_expr, X, y)
+            if true_r2 > candidate_r2 + 0.05:
+                sample = HardNegativeSample(
+                    anchor_expr=true_expr,
+                    negative_expr=candidate_expr,
+                    data_X=X,
+                    data_y=y
+                )
+                print(f"真实表达式：{true_expr}，准确度：{true_r2:.4f} \n添加难负样本:{candidate_expr}，准确度：{candidate_r2:.4f}\n难负样本结构相似度：{structure_sim:.4f}")
 
-                # 放宽准确度差异要求
-                if true_r2 > candidate_r2 + 0.05:  # 从10%降到5%
-                    # 添加到难负样本池
-                    sample = HardNegativeSample(
-                        anchor_expr=true_expr,
-                        negative_expr=candidate_expr,
-                        data_X=X,
-                        data_y=y
-                    )
-                    print(f"真实表达式：{true_expr}，准确度：{true_r2:.4f} \n添加难负样本:{candidate_expr}，准确度：{candidate_r2:.4f}\n难负样本结构相似度：{structure_sim:.4f}")
-
-                    self.hard_negative_pool.append(sample)
-                    self.statistics['hard_negatives_found'] += 1
-
-        except Exception as e:
-            self.logger.warning(f"检查难负样本时出错: {e}")
-        finally:
-            # 清理临时张量
-            del true_embedding, candidate_embedding, true_tensor, candidate_tensor
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
+                self.hard_negative_pool.append(sample)
+                self.statistics['hard_negatives_found'] += 1
 
     def _evaluate_r2(self, expression: str, X: np.ndarray, y: np.ndarray) -> float:
         """评估表达式的R²分数"""
@@ -490,86 +471,47 @@ class OnlineFinetuneLoop:
 
     def _compute_alignment_loss(self, expression: str, X: np.ndarray, y: np.ndarray) -> torch.Tensor:
         """计算表达式与数据的对齐损失"""
-        try:
-            # 计算表达式嵌入
-            expr_embedding = self.expression_encoder.encode(expression, training=True)
+        expr_embedding = self.expression_encoder.encode(expression, training=True)
 
-            # 计算数据嵌入
-            X_tensor = torch.FloatTensor(X).to(self.device)
-            y_tensor = torch.FloatTensor(y).to(self.device)
-            data_embedding = self.data_encoder.encode(X_tensor, y_tensor)
+        X_tensor = torch.FloatTensor(X).to(self.device)
+        y_tensor = torch.FloatTensor(y).to(self.device)
+        data_embedding = self.data_encoder.encode(X_tensor, y_tensor)
 
-            # 计算余弦相似度损失（距离为1 - 相似度）
-            cosine_sim = torch.nn.functional.cosine_similarity(
-                expr_embedding.unsqueeze(0),
-                data_embedding.unsqueeze(0)
-            )
+        cosine_sim = F.cosine_similarity(
+            expr_embedding.unsqueeze(0),
+            data_embedding.unsqueeze(0)
+        )
 
-            alignment_loss = 1 - cosine_sim  # 转换为距离
-
-            # 清理不再需要的张量（但保留用于反向传播的嵌入）
-            del X_tensor, y_tensor
-
-            return alignment_loss
-
-        except Exception:
-            return torch.tensor(0.0, device=self.device)
+        return 1 - cosine_sim
 
     def _compute_batch_finetune_loss(self, batch_samples: List[HardNegativeSample]) -> Tuple[torch.Tensor, torch.Tensor]:
         """计算批次级别的微调损失"""
         if not batch_samples:
             return torch.tensor(0.0, device=self.device), torch.tensor(0.0, device=self.device)
 
-        total_triplet_loss = 0.0
-        total_alignment_loss = 0.0
+        losses = [self._compute_finetune_loss(s.anchor_expr, s.negative_expr, s.data_X, s.data_y)
+                 for s in batch_samples]
 
-        for sample in batch_samples:
-            triplet_loss, alignment_loss = self._compute_finetune_loss(
-                sample.anchor_expr,
-                sample.negative_expr,
-                sample.data_X,
-                sample.data_y
-            )
+        triplet_losses, alignment_losses = zip(*losses)
 
-            total_triplet_loss += triplet_loss
-            total_alignment_loss += alignment_loss
-
-            # 处理完每个样本后，清理GPU内存（保留损失张量）
-            del triplet_loss, alignment_loss
-
-        # 计算平均损失
-        avg_triplet_loss = total_triplet_loss / len(batch_samples)
-        avg_alignment_loss = total_alignment_loss / len(batch_samples)
-
-        return avg_triplet_loss, avg_alignment_loss
+        return sum(triplet_losses) / len(batch_samples), sum(alignment_losses) / len(batch_samples)
 
     def _validate(self, val_tasks: List[Tuple[str, np.ndarray, np.ndarray]]) -> Dict[str, float]:
         """验证模型性能"""
         self.expression_encoder.eval()
         self.data_encoder.eval()
 
-        total_reward = 0.0
-        total_count = 0
-
+        rewards = []
         with torch.no_grad():
             for true_expr, X, y in val_tasks:
-                # 执行MCTS搜索
-                best_expr, mcts_reward_dict, mcts_reward = self.mcts_engine.search(
+                _, _, mcts_reward = self.mcts_engine.search(
                     task_data=(X, y),
                     target_expression=true_expr,
                     verbose=False
                 )
+                rewards.append(mcts_reward)
 
-                total_reward += mcts_reward
-                total_count += 1
-
-            # 清理GPU内存（验证结束后）
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-
-        avg_reward = total_reward / max(1, total_count)
-
-        return {'reward': avg_reward}
+        return {'reward': sum(rewards) / len(rewards)}
 
     def train_with_hard_negatives(
         self,
@@ -586,26 +528,19 @@ class OnlineFinetuneLoop:
         self.expression_encoder.train()
         self.data_encoder.train()
 
-        total_triplet_loss = 0.0
+        triplet_losses = []
 
-        # 随机采样训练
         for epoch in range(epochs):
-            # 随机采样一个批次
             samples = np.random.choice(
                 list(self.hard_negative_pool),
                 size=min(batch_size, len(self.hard_negative_pool)),
                 replace=False
             )
 
-            # 计算损失
             triplet_loss, _ = self._compute_batch_finetune_loss(list(samples))
 
-            # 使用三元组损失作为总损失
-            total_loss = triplet_loss
-
-            # 反向传播
             self.optimizer.zero_grad()
-            total_loss.backward()
+            triplet_loss.backward()
 
             torch.nn.utils.clip_grad_norm_(
                 list(self.expression_encoder.parameters()) +
@@ -614,24 +549,12 @@ class OnlineFinetuneLoop:
             )
 
             self.optimizer.step()
+            triplet_losses.append(triplet_loss.item())
 
-            total_triplet_loss += triplet_loss.item()
+        avg_triplet_loss = sum(triplet_losses) / len(triplet_losses)
+        self.logger.info(f"难负样本训练完成: Triplet Loss = {avg_triplet_loss:.4f}")
 
-            # 清理GPU内存（每个epoch后）
-            del total_loss, triplet_loss
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-
-        avg_triplet_loss = total_triplet_loss / epochs
-
-        self.logger.info(
-            f"难负样本训练完成: Triplet Loss = {avg_triplet_loss:.4f}"
-        )
-
-        return {
-            'triplet_loss': avg_triplet_loss,
-            'total_loss': avg_triplet_loss
-        }
+        return {'triplet_loss': avg_triplet_loss, 'total_loss': avg_triplet_loss}
 
     def save_pretrained(self, save_path: str):
         """保存微调后的模型"""

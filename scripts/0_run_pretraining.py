@@ -25,6 +25,7 @@ from symbolic_regression.models.data_encoder import DataEncoder
 from symbolic_regression.training.pretrain_pipeline import PretrainPipeline
 from symbolic_regression.utils.data_loader import DataLoader, load_pysr_data
 from symbolic_regression.utils.config_utils import load_config
+from symbolic_regression.utils.model_utils import load_pretrained_models, save_models, check_model_exists
 
 
 
@@ -86,9 +87,22 @@ def main():
     np.random.seed(config['random_seed'])
     device = config['device']
     
-    # 创建模型和预训练管道
-    expression_encoder = ExpressionEncoder(**config['model']['expression_encoder'])
-    data_encoder = DataEncoder(**config['model']['data_encoder'])
+    # 模型目录
+    model_dir = config['training']['model_dir']
+    
+    # 检查和加载预训练模型
+    expression_encoder, data_encoder, loaded_existing = load_pretrained_models(
+        model_dir, device, auto_create=True
+    )
+    
+    # 如果没有加载到现有模型，创建新模型
+    if expression_encoder is None or data_encoder is None:
+        print("创建新模型")
+        expression_encoder = ExpressionEncoder(**config['model']['expression_encoder'])
+        data_encoder = DataEncoder(**config['model']['data_encoder'])
+        expression_encoder.to(device)
+        data_encoder.to(device)
+    
     pretrain_pipeline = PretrainPipeline(
         expression_encoder=expression_encoder,
         data_encoder=data_encoder,
@@ -106,7 +120,9 @@ def main():
     
     # 开始预训练
     training_history = pretrain_pipeline.fit(expressions=expressions, datasets=datasets)
-    pretrain_pipeline.save_pretrained()
+    
+    # 保存模型
+    save_models(expression_encoder, data_encoder, model_dir)
 
     # 打印结果
     print("\n" + "=" * 60)
@@ -114,7 +130,7 @@ def main():
     print("=" * 60)
     print(f"最终训练损失: {training_history['train_loss']['loss'][-1]:.4f}")
     print(f"最终验证损失: {training_history['val_loss']['loss'][-1]:.4f}")
-    print(f"模型保存路径: {config['training']['pretrain']['output_dir']}")
+    print(f"模型保存路径: {model_dir}")
     
     return 0
 

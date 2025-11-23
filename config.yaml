@@ -73,6 +73,8 @@ mcts:
 
 # 训练配置
 training:
+  # 统一模型存储目录
+  model_dir: "models_weights/"
   # 预训练配置
   pretrain:
     batch_size: 32
@@ -82,7 +84,6 @@ training:
     warmup_steps: 1000
     save_steps: 1000
     eval_steps: 1000
-    output_dir: "models_weights/pretrained/"
   
   # 在线微调配置
   online_finetune:
@@ -91,7 +92,6 @@ training:
     mcts_epochs: 50      # MCTS轮数
     eval_steps: 10       # 每多少轮评估一次
     save_steps: 10       # 每多少轮保存一次
-    output_dir: "models_weights/finetuned/"
     
     # 难负样本池配置
     hard_negative_pool_size: 1000

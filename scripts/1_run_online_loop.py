@@ -25,6 +25,7 @@ from symbolic_regression.training.finetune_loop import OnlineFinetuneLoop
 from symbolic_regression.core.reward_calculator import RewardCalculator
 from symbolic_regression.utils.config_utils import load_config
 from symbolic_regression.utils.data_loader import load_pysr_data
+from symbolic_regression.utils.model_utils import load_pretrained_models, save_models, check_model_exists
 
 
 
@@ -32,25 +33,7 @@ from symbolic_regression.utils.data_loader import load_pysr_data
 
 
     
-def load_pretrained_models(
-    pretrained_dir: str,
-    device: str = 'cpu'
-) -> Tuple[ExpressionEncoder, DataEncoder]:
-    """加载预训练模型"""
-    expr_path = os.path.join(pretrained_dir, 'expression_encoder')
-    data_path = os.path.join(pretrained_dir, 'data_encoder')
 
-    print(f"加载预训练模型从: {pretrained_dir}")
-
-    expression_encoder = ExpressionEncoder.from_pretrained(expr_path)
-    data_encoder = DataEncoder.from_pretrained(data_path)
-
-    expression_encoder.to(device)
-    data_encoder.to(device)
-
-    print("预训练模型加载完成")
-
-    return expression_encoder, data_encoder
 
 
 def main():
@@ -63,7 +46,6 @@ def main():
     print(f"\n使用设备: {device}\n")
 
     # 创建输出目录
-    os.makedirs('models_weights/finetuned', exist_ok=True)
     os.makedirs('results/logs', exist_ok=True)
 
     # 设置日志
@@ -77,15 +59,15 @@ def main():
     )
 
     # 检查是否有预训练模型
-    pretrained_dir = config['training']['pretrain']['output_dir']
+    model_dir = config['training']['model_dir']
 
-    if not os.path.exists(os.path.join(pretrained_dir, 'expression_encoder')):
+    if not check_model_exists(model_dir):
         print(f"错误: 找不到预训练模型，请先运行预训练脚本")
         print(f"  运行: python scripts/0_run_pretraining.py")
         sys.exit(1)
 
     # 加载预训练模型
-    expression_encoder, data_encoder = load_pretrained_models(pretrained_dir, device)
+    expression_encoder, data_encoder, _ = load_pretrained_models(model_dir, device)
 
     # 加载PySR数据集
     datasets = load_pysr_data("data/pysr_datasets")
@@ -126,23 +108,22 @@ def main():
         mcts_epochs=config['training']['online_finetune'].get('mcts_epochs', 50),
         eval_steps=config['training']['online_finetune'].get('eval_steps', 10),
         save_steps=config['training']['online_finetune'].get('save_steps', 10),
-        output_dir=config['training']['online_finetune']['output_dir'],
+        output_dir=model_dir,  # 使用统一的模型目录
         verbose=True
     )
 
-    # 保存最终模型
-    final_model_path = config['training']['online_finetune']['output_dir']
-    finetune_loop.save_pretrained(final_model_path)
+    # 保存最终模型（使用统一的save_models函数）
+    save_models(expression_encoder, data_encoder, model_dir)
 
     # 打印最终统计信息
     stats = finetune_loop.get_statistics()
     print("\n" + "=" * 60)
     print("在线微调完成")
-    print(f"模型已保存到: {final_model_path}")
+    print(f"模型已保存到: {model_dir}")
 
     # 保存训练历史
     import json
-    history_file = os.path.join(final_model_path, 'training_history.json')
+    history_file = os.path.join(model_dir, 'training_history.json')
     with open(history_file, 'w') as f:
         json.dump({
             'train_history': train_history,

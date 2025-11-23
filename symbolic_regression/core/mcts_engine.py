@@ -347,7 +347,7 @@ class MCTSEngine:
             self.statistics['total_iterations'] += 1
             self.statistics['total_simulations'] += 1
 
-        return best_expression,best_reward_dict,best_reward
+        return best_expression, best_reward_dict, best_reward
 
     def _select_node(self, root: MCTSNode) -> MCTSNode:
         """选择步骤：使用UCB选择最佳节点"""
@@ -456,38 +456,71 @@ class MCTSEngine:
         task_data: Optional[Tuple[np.ndarray, np.ndarray]]
     ) -> Tuple[float, Dict[str, float]]:
         """模拟步骤：通过rollout评估表达式的奖励"""
-        # 提取特征数用于rollout
-        feature_count = 3  # 默认值
-        if task_data is not None:
-            X, y = task_data
-            feature_count = X.shape[1]
-        
-        # 执行rollout：从当前表达式开始随机扩展
-        rollout_expression, rollout_path = self._rollout(
-            expression, 
-            remaining_depth=self.max_depth - self._get_expression_depth(expression),
-            feature_count=feature_count
-        )
+        # 跟踪所有GPU张量以便彻底清理
+        gpu_tensors_to_cleanup = []
+        X_tensor = None
+        y_tensor = None
 
-        # 计算最终表达式嵌入
-        expr_embedding = self._get_expression_embedding(rollout_expression)
+        try:
+            # 提取特征数用于rollout
+            feature_count = 3  # 默认值
+            if task_data is not None:
+                X, y = task_data
+                feature_count = X.shape[1]
 
-        # 计算奖励（包含rollout路径奖励）
-        total_reward, reward_dict = self._calculate_reward(
-            rollout_expression,
-            expr_embedding,
-            task_embedding,
-            target_expression,
-            task_data,
-            rollout_path=rollout_path  # 传递rollout路径
-        )
+            # 如果没有提供task_embedding，则计算（仅在必要时）
+            local_task_embedding = task_embedding
+            if task_embedding is None and task_data is not None:
+                X_tensor = torch.FloatTensor(X).to(self.device)
+                y_tensor = torch.FloatTensor(y).to(self.device)
+                gpu_tensors_to_cleanup.extend([X_tensor, y_tensor])
 
-        # GPU内存优化：及时清理临时变量
-        del expr_embedding
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+                if self.freeze_encoders:
+                    self.expression_encoder.eval()
+                    self.data_encoder.eval()
+                    with torch.no_grad():
+                        local_task_embedding = self.data_encoder.encode(X_tensor, y_tensor)
+                else:
+                    local_task_embedding = self.data_encoder.encode(X_tensor, y_tensor)
 
-        return total_reward, reward_dict
+                gpu_tensors_to_cleanup.append(local_task_embedding)
+
+            # 执行rollout：从当前表达式开始随机扩展
+            rollout_expression, rollout_path = self._rollout(
+                expression,
+                remaining_depth=self.max_depth - self._get_expression_depth(expression),
+                feature_count=feature_count
+            )
+
+            # 计算最终表达式嵌入
+            expr_embedding = self._get_expression_embedding(rollout_expression)
+            gpu_tensors_to_cleanup.append(expr_embedding)
+
+            # 计算奖励（包含rollout路径奖励）
+            total_reward, reward_dict = self._calculate_reward(
+                rollout_expression,
+                expr_embedding,
+                local_task_embedding,
+                target_expression,
+                task_data,
+                rollout_path=rollout_path  # 传递rollout路径
+            )
+
+            return total_reward, reward_dict
+
+        finally:
+            # 彻底清理所有GPU张量
+            for tensor in gpu_tensors_to_cleanup:
+                if tensor is not None and hasattr(tensor, 'is_cuda') and tensor.is_cuda:
+                    try:
+                        del tensor
+                    except RuntimeError:
+                        # 张量可能已经被删除
+                        pass
+
+            # 清理GPU缓存
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
 
     def _rollout(self, start_expression: str, remaining_depth: int, feature_count: int = 3) -> Tuple[str, List[str]]:
@@ -728,21 +761,26 @@ class MCTSEngine:
             )
 
         # 2. 结构对齐奖励（仅在微调阶段使用）
+        target_embedding = None  # 确保变量存在
         if target_expression is not None:
             try:
                 # 使用GPU内存优化模式获取目标嵌入
                 target_embedding = self._get_expression_embedding(target_expression)
-                
+
                 reward_dict['structure_alignment'] = self.reward_calculator._calculate_structure_alignment_reward(
                     expr_embedding.detach().cpu().numpy(),
                     target_embedding.detach().numpy()
                 )
-                
-                # 及时清理临时变量（如果存在的话）
-                del target_embedding
-                
+
             except Exception:
                 reward_dict['structure_alignment'] = 0.0
+            finally:
+                # 确保清理target_embedding
+                if target_embedding is not None and target_embedding.is_cuda:
+                    try:
+                        del target_embedding
+                    except:
+                        pass
 
         # 3. 准确度奖励（真实精度）
         if task_data is not None:
@@ -825,6 +863,11 @@ class MCTSEngine:
     ) -> float:
         """评估表达式的准确度（R²分数）"""
         try:
+            # 检查缓存
+            cache_key = f"{expression}_{hash(str(X.shape))}_{hash(str(y.shape))}"
+            if cache_key in self.expr_cache:
+                return self.expr_cache[cache_key]
+
             # 安全求值
             y_pred = self._safe_eval_expression(expression, X)
 
@@ -849,7 +892,8 @@ class MCTSEngine:
                         r2_score = 1 - r2_ratio
 
             # 缓存结果
-            self.expr_cache[cache_key] = r2_score
+            if len(self.expr_cache) < 10000:  # 防止缓存过大
+                self.expr_cache[cache_key] = r2_score
 
             return r2_score
 

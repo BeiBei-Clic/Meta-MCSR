@@ -671,7 +671,7 @@ class MCTSEngine:
         
         return False
 
-    def _get_expression_embedding(self, expression: str, force_cpu: bool = False) -> torch.Tensor:
+    def _get_expression_embedding(self, expression: str) -> torch.Tensor:
         """获取表达式嵌入（带缓存和GPU内存优化）"""
         try:
             # 计算嵌入
@@ -683,6 +683,7 @@ class MCTSEngine:
                 embedding = self.expression_encoder.encode(expression, training=True)
 
             self.embedding_cache[expression] = embedding
+            return embedding
 
         except Exception as e:
             print(f"警告: 计算嵌入失败 {expression}: {e}")
@@ -691,13 +692,9 @@ class MCTSEngine:
                 self.expression_encoder.eval()
                 with torch.no_grad():
                     zero_embedding = torch.zeros(512, dtype=torch.float32)
-                    if not force_cpu and torch.cuda.is_available():
-                        zero_embedding = zero_embedding.cuda()
                     return zero_embedding
             else:
                 zero_embedding = torch.zeros(512, dtype=torch.float32)
-                if not force_cpu and torch.cuda.is_available():
-                    zero_embedding = zero_embedding.cuda()
                 return zero_embedding
 
     def _calculate_reward(
@@ -734,7 +731,7 @@ class MCTSEngine:
         if target_expression is not None:
             try:
                 # 使用GPU内存优化模式获取目标嵌入
-                target_embedding = self._get_expression_embedding(target_expression, force_cpu=True)
+                target_embedding = self._get_expression_embedding(target_expression)
                 
                 reward_dict['structure_alignment'] = self.reward_calculator._calculate_structure_alignment_reward(
                     expr_embedding.detach().cpu().numpy(),

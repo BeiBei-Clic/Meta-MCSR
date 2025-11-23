@@ -51,13 +51,7 @@ class ExpressionTokenizer:
             '<PAD>': 0,
             '<UNK>': 1,
             '<CLS>': 2,
-            '<SEP>': 3,
-            '<VAR>': 4,
-            '<CONST>': 5, 
-            '<OP>': 6,
-            '<FUNC>': 7,
-            '<LPAREN>': 8,
-            '<RPAREN>': 9
+            '<SEP>': 3
         }
         
         # 合并特殊token到主vocab
@@ -69,24 +63,24 @@ class ExpressionTokenizer:
     
     def _build_vocab(self) -> Dict[str, int]:
         """构建基本词汇表"""
-        # 基本数学符号和数字
-        basic_tokens = ['0', '1', '2', '3', '4', '5', '6', '7', '8', '9']
-        
-        # 运算符
-        operators = ['+', '-', '*', '/', '^', '(', ')', ',', '=', '<', '>', '!']
+        # 运算符和标点符号（包括小数点）
+        operators = ['+', '-', '*', '/', '^', '(', ')', ',', '=', '<', '>', '!', '.']
         
         # 数学函数
-        functions = ['sin', 'cos', 'tan', 'log', 'ln', 'exp', 'sqrt', 'abs', 'min', 'max']
+        functions = ['sin', 'cos', 'tan', 'log', 'ln', 'exp', 'sqrt', 'abs', 'min', 'max', 'asin', 'acos', 'atan', 'sinh', 'cosh', 'tanh', 'log10', 'sec', 'csc', 'cot', 'floor', 'ceil', 'round']
         
-        # 变量模式
-        variables = [f'x{i}' for i in range(1, 101)]  # x1, x2, ..., x100
+        # 变量模式 - 扩展到更多变量
+        variables = [f'x{i}' for i in range(1, 1001)]  # x1, x2, ..., x1000
+        
+        # 添加更多变量名格式
+        additional_variables = [f'v{i}' for i in range(1, 101)] + [f'y{i}' for i in range(1, 51)] + [f'z{i}' for i in range(1, 51)]
         
         # 特殊token
-        special = ['<PAD>', '<UNK>', '<CLS>', '<SEP>', '<VAR>', '<CONST>', '<OP>', '<FUNC>', '<LPAREN>', '<RPAREN>']
+        special = ['<PAD>', '<UNK>', '<CLS>', '<SEP>']
         
         # 构建词汇表
         vocab = {}
-        token_list = basic_tokens + operators + functions + variables + special
+        token_list = operators + functions + variables + additional_variables + special
         
         for i, token in enumerate(token_list):
             vocab[token] = i
@@ -114,7 +108,22 @@ class ExpressionTokenizer:
             tokens = tokens[:self.max_length-1] + ['<SEP>']
         
         # 转换为ID
-        token_ids = [self.vocab.get(token, self.unk_token_id) for token in tokens]
+        token_ids = []
+        for token in tokens:
+            if token in self.vocab:
+                token_ids.append(self.vocab[token])
+            else:
+                # 对于不在词汇表中的token，尝试分解或使用<UNK>
+                # 首先尝试将token分解为更小的部分
+                if re.match(r'\d+\.\d+', token):  # 浮点数
+                    # 将浮点数分解为整数部分和小数部分
+                    parts = token.split('.')
+                    token_ids.append(self.vocab.get(parts[0], self.unk_token_id))
+                    token_ids.append(self.vocab.get('.', self.unk_token_id))
+                    token_ids.append(self.vocab.get(parts[1], self.unk_token_id))
+                else:
+                    # 直接使用<UNK>
+                    token_ids.append(self.unk_token_id)
         
         # 创建attention mask
         attention_mask = [1] * len(token_ids)
@@ -131,72 +140,50 @@ class ExpressionTokenizer:
     
     def _preprocess_and_tokenize(self, expression: str) -> List[str]:
         """预处理并分词表达式"""
-        # 匹配数字（包括小数）
-        expression = re.sub(r'\b\d+\.?\d*\b', '<CONST>', expression)
+        # 保留所有原始信息，不进行统一替换
+        # 定义支持的函数列表
+        functions = ['sin', 'cos', 'tan', 'log', 'ln', 'exp', 'sqrt', 'abs', 'min', 'max', 'asin', 'acos', 'atan', 'sinh', 'cosh', 'tanh', 'log10', 'sec', 'csc', 'cot', 'floor', 'ceil', 'round']
         
-        # 匹配函数调用
-        functions = ['sin', 'cos', 'tan', 'log', 'ln', 'exp', 'sqrt', 'abs', 'min', 'max']
-        for func in functions:
-            pattern = rf'\b{func}\s*\('
-            replacement = f'<FUNC>('
-            expression = re.sub(pattern, replacement, expression)
-        
-        # 匹配变量 (x1, x2, etc.)
-        expression = re.sub(r'\bx\d+\b', '<VAR>', expression)
+        # 运算符和标点符号
+        operators = ['+', '-', '*', '/', '^', '(', ')', ',', '=', '<', '>', '!']
         
         # 分割为token
-        # 首先处理特殊token
         tokens = []
         i = 0
+        
         while i < len(expression):
-            # 检查特殊token
-            found_special = False
-            for special_token in ['<CONST>', '<VAR>', '<FUNC>', '<LPAREN>', '<RPAREN>']:
-                if expression[i:i+len(special_token)] == special_token:
-                    tokens.append(special_token)
-                    i += len(special_token)
-                    found_special = True
-                    break
-            
-            if found_special:
+            # 跳过空白字符
+            if expression[i].isspace():
+                i += 1
                 continue
-                
+            
             char = expression[i]
             
-            # 如果是空白字符，跳过
-            if char.isspace():
+            # 检查是否是运算符或标点符号
+            if char in operators:
+                # 处理多个字符的运算符
+                if i + 1 < len(expression):
+                    two_char_op = expression[i:i+2]
+                    if two_char_op in ['<=', '>=', '==', '!=']:
+                        tokens.append(two_char_op)
+                        i += 2
+                        continue
+                
+                tokens.append(char)
                 i += 1
                 continue
-                
-            # 运算符和标点符号
-            if char in '+-*/^(),=<>!':
-                tokens.append('<OP>')
-                i += 1
-            # 数字或字母继续由上面的正则表达式处理
-            else:
-                # 收集连续的非空白字符
-                j = i
-                while j < len(expression) and not expression[j].isspace() and expression[j] not in '+-*/^(),=<>!':
-                    # 检查是否会遇到特殊token
-                    found_sub_special = False
-                    for special_token in ['<CONST>', '<VAR>', '<FUNC>', '<LPAREN>', '<RPAREN>']:
-                        if expression[j:j+len(special_token)] == special_token:
-                            found_sub_special = True
-                            break
-                    
-                    if found_sub_special:
-                        break
-                    
-                    j += 1
-                
-                token = expression[i:j]
-                if token.strip():
-                    # 简单检查是否是函数
-                    if token in functions:
-                        tokens.append('<FUNC>')
-                    else:
-                        tokens.append(token)
-                i = j
+            
+            # 收集连续的非运算符字符
+            j = i
+            while j < len(expression) and not expression[j].isspace() and expression[j] not in operators:
+                j += 1
+            
+            token = expression[i:j].strip()
+            
+            if token:
+                tokens.append(token)
+            
+            i = j
         
         return tokens
 
@@ -251,8 +238,8 @@ class ExpressionEncoder(nn.Module):
     
     def get_vocab_size(self) -> int:
         """获取词汇表大小"""
-        # 这里返回一个固定值，实际使用时 ExpressionTokenizer 会创建真实的词汇表
-        return 50010  # 基础词汇表大小
+        tokenizer = ExpressionTokenizer()
+        return tokenizer.vocab_size
         
     def forward(self, input_ids: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
         """
@@ -320,20 +307,38 @@ class ExpressionEncoder(nn.Module):
         input_ids = encoded['input_ids'].unsqueeze(0).to(device)
         attention_mask = encoded['attention_mask'].unsqueeze(0).to(device)
 
-        # 确保模型可以处理当前词汇表大小
+        # 动态扩展词汇表和embedding层以处理新的token
+        tokenizer = ExpressionTokenizer()
+        vocab = tokenizer.vocab
+        vocab_size = len(vocab)
+        
+        # 检查是否有不在当前词汇表中的token
+        token_ids = encoded['input_ids'].tolist()
+        vocab_items = list(tokenizer.vocab.items())
+        
         if hasattr(self, 'token_embedding'):
-            vocab_size = self.token_embedding.num_embeddings
-            max_id = input_ids.max().item()
-            if max_id >= vocab_size:
+            current_vocab_size = self.token_embedding.num_embeddings
+            if current_vocab_size < vocab_size:
                 # 扩展 embedding 层
-                new_num_embeddings = max_id + 1
                 old_state_dict = self.state_dict()
-                self.token_embedding = nn.Embedding(new_num_embeddings, self.embedding_dim).to(device)
+                self.token_embedding = nn.Embedding(vocab_size, self.embedding_dim).to(device)
                 # 复制旧权重
-                old_size = min(old_state_dict['token_embedding.weight'].shape[0], new_num_embeddings)
+                old_size = min(old_state_dict['token_embedding.weight'].shape[0], vocab_size)
                 self.token_embedding.weight.data[:old_size] = old_state_dict['token_embedding.weight'][:old_size]
                 # 重新初始化新权重
                 nn.init.normal_(self.token_embedding.weight[old_size:], mean=0, std=0.02)
+                
+            # 重新映射 token IDs 到新的词汇表
+            new_input_ids = []
+            for token_id in token_ids:
+                if token_id < len(tokenizer.id_to_token):
+                    token = tokenizer.id_to_token[token_id]
+                    new_id = vocab.get(token, tokenizer.unk_token_id)
+                    new_input_ids.append(new_id)
+                else:
+                    new_input_ids.append(tokenizer.unk_token_id)
+            
+            input_ids = torch.tensor(new_input_ids, dtype=torch.long).unsqueeze(0).to(device)
 
         # 编码
         embedding = self.forward(input_ids, attention_mask)

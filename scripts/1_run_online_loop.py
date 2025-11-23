@@ -26,15 +26,7 @@ from symbolic_regression.core.reward_calculator import RewardCalculator
 from symbolic_regression.utils.config_utils import load_config
 from symbolic_regression.utils.data_loader import load_pysr_data
 from symbolic_regression.utils.model_utils import load_pretrained_models, save_models, check_model_exists
-
-
-
-
-
-
-    
-
-
+from symbolic_regression.utils.logging_utils import setup_logger
 
 def main():
     """主函数"""
@@ -45,18 +37,8 @@ def main():
     device = config.get('device', 'cuda' if torch.cuda.is_available() else 'cpu')
     print(f"\n使用设备: {device}\n")
 
-    # 创建输出目录
-    os.makedirs('results/logs', exist_ok=True)
-
     # 设置日志
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-        handlers=[
-            logging.StreamHandler(),
-            logging.FileHandler('results/logs/online_finetune.log')
-        ]
-    )
+    setup_logger('online_finetune.log')
 
     # 检查是否有预训练模型
     model_dir = config['training']['model_dir']

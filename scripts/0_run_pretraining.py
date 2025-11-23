@@ -26,24 +26,12 @@ from symbolic_regression.training.pretrain_pipeline import PretrainPipeline
 from symbolic_regression.utils.data_loader import DataLoader, load_pysr_data
 from symbolic_regression.utils.config_utils import load_config
 from symbolic_regression.utils.model_utils import load_pretrained_models, save_models, check_model_exists
+from symbolic_regression.utils.logging_utils import setup_logger
 
 
 
 
 
-def setup_logging():
-    """设置日志"""
-    # 确保日志目录存在
-    os.makedirs('results/logs', exist_ok=True)
-
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-        handlers=[
-            logging.StreamHandler(),
-            logging.FileHandler('results/logs/pretrain.log')
-        ]
-    )
 
 
 
@@ -78,8 +66,7 @@ def main():
     print("=" * 60)
     
     # 设置日志
-    setup_logging()
-    logger = logging.getLogger(__name__)
+    setup_logger('pretrain.log')
     
     # 加载配置和设置环境
     config = load_config()

@@ -210,7 +210,6 @@ class OnlineFinetuneLoop:
         # 主微调循环
         train_history = {
             'triplet_loss': [],
-            'alignment_loss': [],
             'total_loss': [],
             'mcts_reward': []
         }
@@ -221,7 +220,6 @@ class OnlineFinetuneLoop:
             # 为每个基准任务执行MCTS+微调
             epoch_metrics = {
                 'triplet_loss': 0.0,
-                'alignment_loss': 0.0,
                 'total_loss': 0.0,
                 'mcts_reward': 0.0,
                 'count': 0
@@ -250,15 +248,30 @@ class OnlineFinetuneLoop:
                     true_expr, best_expr, X, y, true_expr
                 )
 
-                # 计算微调损失
-                total_loss, alignment_loss = self._compute_finetune_loss(
-                    true_expr, best_expr, X, y
+                # 记录MCTS奖励
+                epoch_metrics['mcts_reward'] += best_reward
+
+                # 检查是否有难负样本，如果没有则跳过微调
+                if len(self.hard_negative_pool) == 0:
+                    epoch_metrics['count'] += 1
+                    # 更新进度条
+                    if verbose:
+                        pbar.set_postfix({
+                            'Total Loss': f"0.0000 (skip)",
+                            'Hard Neg Pool': f"{len(self.hard_negative_pool)}"
+                        })
+                    continue
+
+                # 有难负样本，进行微调
+                # 使用当前难负样本池中的样本进行训练
+                triplet_loss, _ = self._compute_batch_finetune_loss(
+                    list(self.hard_negative_pool)
                 )
 
-                # 记录指标
-                epoch_metrics['triplet_loss'] += total_loss.item()
-                epoch_metrics['alignment_loss'] += alignment_loss.item()
+                # 使用三元组损失作为总损失
+                total_loss = triplet_loss
 
+                # 反向传播
                 self.optimizer.zero_grad()
                 total_loss.backward()
 
@@ -272,6 +285,7 @@ class OnlineFinetuneLoop:
                 self.optimizer.step()
 
                 # 记录指标
+                epoch_metrics['triplet_loss'] += triplet_loss.item()
                 epoch_metrics['total_loss'] += total_loss.item()
                 epoch_metrics['count'] += 1
 
@@ -289,7 +303,6 @@ class OnlineFinetuneLoop:
                         epoch_metrics[key] /= epoch_metrics['count']
 
                 train_history['triplet_loss'].append(epoch_metrics['triplet_loss'])
-                train_history['alignment_loss'].append(epoch_metrics['alignment_loss'])
                 train_history['total_loss'].append(epoch_metrics['total_loss'])
                 train_history['mcts_reward'].append(epoch_metrics['mcts_reward'])
 
@@ -457,22 +470,14 @@ class OnlineFinetuneLoop:
             negative=candidate_embedding
         )
 
-        # 计算对齐损失（表达式与数据的对齐程度）
-        alignment_loss = self._compute_alignment_loss(true_expr, X, y)
-
-        # 加权组合损失
-        total_loss = triplet_loss + self.alignment_loss_weight * alignment_loss
-
         # 调试输出（仅在前几步）
         if self.global_step < 5:
             self.logger.info(f"Step {self.global_step}:")
             self.logger.info(f"  Triplet Loss: {triplet_loss.item():.6f}")
-            self.logger.info(f"  Alignment Loss: {alignment_loss.item():.6f}")
-            self.logger.info(f"  Total Loss: {total_loss.item():.6f}")
             self.logger.info(f"  True Expr: {true_expr}")
             self.logger.info(f"  Best Expr: {best_expr}")
 
-        return total_loss, alignment_loss
+        return triplet_loss
 
     def _compute_alignment_loss(self, expression: str, X: np.ndarray, y: np.ndarray) -> torch.Tensor:
         """计算表达式与数据的对齐损失"""
@@ -555,7 +560,7 @@ class OnlineFinetuneLoop:
         """使用难负样本池训练模型"""
         if len(self.hard_negative_pool) == 0:
             self.logger.warning("难负样本池为空，跳过训练")
-            return {'triplet_loss': 0.0, 'alignment_loss': 0.0, 'total_loss': 0.0}
+            return {'triplet_loss': 0.0, 'total_loss': 0.0}
 
         self.logger.info(f"使用{len(self.hard_negative_pool)}个难负样本进行训练")
 
@@ -563,7 +568,6 @@ class OnlineFinetuneLoop:
         self.data_encoder.train()
 
         total_triplet_loss = 0.0
-        total_alignment_loss = 0.0
 
         # 随机采样训练
         for epoch in range(epochs):
@@ -575,11 +579,12 @@ class OnlineFinetuneLoop:
             )
 
             # 计算损失
-            triplet_loss, alignment_loss = self._compute_batch_finetune_loss(list(samples))
+            triplet_loss, _ = self._compute_batch_finetune_loss(list(samples))
+
+            # 使用三元组损失作为总损失
+            total_loss = triplet_loss
 
             # 反向传播
-            total_loss = triplet_loss + self.alignment_loss_weight * alignment_loss
-
             self.optimizer.zero_grad()
             total_loss.backward()
 
@@ -592,20 +597,16 @@ class OnlineFinetuneLoop:
             self.optimizer.step()
 
             total_triplet_loss += triplet_loss.item()
-            total_alignment_loss += alignment_loss.item()
 
         avg_triplet_loss = total_triplet_loss / epochs
-        avg_alignment_loss = total_alignment_loss / epochs
 
         self.logger.info(
-            f"难负样本训练完成: Triplet Loss = {avg_triplet_loss:.4f}, "
-            f"Alignment Loss = {avg_alignment_loss:.4f}"
+            f"难负样本训练完成: Triplet Loss = {avg_triplet_loss:.4f}"
         )
 
         return {
             'triplet_loss': avg_triplet_loss,
-            'alignment_loss': avg_alignment_loss,
-            'total_loss': avg_triplet_loss + self.alignment_loss_weight * avg_alignment_loss
+            'total_loss': avg_triplet_loss
         }
 
     def save_pretrained(self, save_path: str):

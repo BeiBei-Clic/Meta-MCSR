@@ -237,11 +237,13 @@ class OnlineFinetuneLoop:
                 true_expr, X, y = train_tasks[task_idx]
 
                 # 执行MCTS探索
-                best_expr, mcts_reward = self.mcts_engine.search(
+                best_expr, reward_dict , best_reward = self.mcts_engine.search(
                     task_data=(X, y),
                     target_expression=true_expr,
                     verbose=False
                 )
+
+                print(f'best_expr: {best_expr}\nreward_dict: {reward_dict}\nbest_reward: {best_reward}')
 
                 # 检查是否为难负样本
                 self._check_and_add_hard_negative(

@@ -325,7 +325,7 @@ class MCTSEngine:
                 node = self._expand_node(node)
 
             # 3. 模拟 (Simulation/Rollout)
-            simulation_reward, reward_breakdown = self._simulate(
+            simulation_reward, reward_dict = self._simulate(
                 node.expression,
                 task_embedding,
                 target_expression,
@@ -333,7 +333,7 @@ class MCTSEngine:
             )
 
             # 4. 反向传播 (Backpropagation)
-            self._backpropagate(node, simulation_reward, reward_breakdown)
+            self._backpropagate(node, simulation_reward, reward_dict)
 
             # 更新最佳解（使用rollout的最终表达式）
             if simulation_reward > best_reward:
@@ -341,12 +341,13 @@ class MCTSEngine:
                 # 注意：这里我们仍然使用原始节点表达式，但在实际应用中，
                 # 可能需要记录rollout的最终表达式
                 best_expression = node.expression
+                best_reward_dict = reward_dict
 
             # 更新统计信息
             self.statistics['total_iterations'] += 1
             self.statistics['total_simulations'] += 1
 
-        return best_expression,best_reward
+        return best_expression,best_reward_dict,best_reward
 
     def _select_node(self, root: MCTSNode) -> MCTSNode:
         """选择步骤：使用UCB选择最佳节点"""
@@ -396,10 +397,6 @@ class MCTSEngine:
 
         # 去重
         candidates = list(set(candidates))
-
-        # 限制候选数量
-        if len(candidates) > 20:
-            candidates = random.sample(candidates, 20)
 
         return candidates
 
@@ -472,7 +469,7 @@ class MCTSEngine:
             feature_count=feature_count
         )
 
-        # 计算最终表达式的奖励
+        # 计算最终表达式嵌入
         expr_embedding = self._get_expression_embedding(rollout_expression)
 
         # 计算奖励（包含rollout路径奖励）
@@ -552,10 +549,6 @@ class MCTSEngine:
         # 去重并过滤
         candidates = list(set(candidates))
         candidates = [expr for expr in candidates if self._is_valid_expression(expr)]
-        
-        # 限制候选数量以避免计算爆炸
-        # if len(candidates) > 10:
-        #     candidates = random.sample(candidates, 10)
             
         return candidates
 
@@ -680,18 +673,6 @@ class MCTSEngine:
 
     def _get_expression_embedding(self, expression: str, force_cpu: bool = False) -> torch.Tensor:
         """获取表达式嵌入（带缓存和GPU内存优化）"""
-        # 检查缓存
-        if expression in self.embedding_cache:
-            self.statistics['cache_hits'] += 1
-            cached_embedding = self.embedding_cache[expression]
-            
-            # 如果请求CPU模式且当前在GPU上，转移
-            if force_cpu and cached_embedding.is_cuda:
-                return cached_embedding.cpu()
-            return cached_embedding
-
-        self.statistics['cache_misses'] += 1
-
         try:
             # 计算嵌入
             if self.freeze_encoders:
@@ -701,22 +682,7 @@ class MCTSEngine:
             else:
                 embedding = self.expression_encoder.encode(expression, training=True)
 
-            # GPU内存优化：使用detach()和可选的CPU转换
-            if force_cpu:
-                # 如果需要CPU模式，直接计算在CPU上
-                if embedding.is_cuda:
-                    embedding = embedding.cpu()
-            else:
-                # 保持GPU内存但detach避免梯度追踪
-                embedding = embedding.detach().clone()
-
-            # 缓存策略：如果缓存太大或请求CPU模式，存储CPU版本
-            if force_cpu or self._should_cache_on_cpu():
-                self.embedding_cache[expression] = embedding.cpu()
-            else:
-                self.embedding_cache[expression] = embedding
-
-            return self.embedding_cache[expression]
+            self.embedding_cache[expression] = embedding
 
         except Exception as e:
             print(f"警告: 计算嵌入失败 {expression}: {e}")
@@ -733,29 +699,6 @@ class MCTSEngine:
                 if not force_cpu and torch.cuda.is_available():
                     zero_embedding = zero_embedding.cuda()
                 return zero_embedding
-
-    def _should_cache_on_cpu(self) -> bool:
-        """判断是否应该将缓存存储在CPU上以节省GPU内存"""
-        if not torch.cuda.is_available():
-            return True  # 没有GPU，全部放CPU
-        
-        # 检查GPU内存使用率
-        try:
-            import psutil
-            gpu_memory = torch.cuda.memory_allocated()
-            gpu_memory_reserved = torch.cuda.memory_reserved()
-            
-            # 如果GPU内存使用超过1GB，建议CPU缓存
-            if gpu_memory > 1e9 or gpu_memory_reserved > 2e9:
-                return True
-        except:
-            pass
-        
-        # 如果缓存项数超过限制，使用CPU缓存
-        if len(self.embedding_cache) > self.cache_size_limit // 2:
-            return True
-        
-        return False
 
     def _calculate_reward(
         self,
@@ -885,11 +828,6 @@ class MCTSEngine:
     ) -> float:
         """评估表达式的准确度（R²分数）"""
         try:
-            # 检查缓存
-            cache_key = f"{expression}_{hash(str(X.shape))}_{hash(str(y.shape))}"
-            if cache_key in self.expr_cache:
-                return self.expr_cache[cache_key]
-
             # 安全求值
             y_pred = self._safe_eval_expression(expression, X)
 

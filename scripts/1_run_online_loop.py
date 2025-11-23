@@ -13,7 +13,6 @@ import numpy as np
 import logging
 from typing import Dict, Any, Optional, Tuple, List
 from pathlib import Path
-import yaml
 
 # 添加项目路径
 project_root = Path(__file__).parent.parent
@@ -24,13 +23,10 @@ from symbolic_regression.models.expression_encoder import ExpressionEncoder
 from symbolic_regression.models.data_encoder import DataEncoder
 from symbolic_regression.training.finetune_loop import OnlineFinetuneLoop
 from symbolic_regression.core.reward_calculator import RewardCalculator
+from symbolic_regression.utils.config_utils import load_config
 
 
-def load_config(config_path: str = "config.yaml") -> Dict[str, Any]:
-    """加载配置文件"""
-    with open(config_path, 'r', encoding='utf-8') as f:
-        config = yaml.safe_load(f)
-    return config
+
 
 
 def load_pysr_datasets(data_dir: str = "data/pysr_datasets") -> Optional[List[Dict[str, Any]]]:

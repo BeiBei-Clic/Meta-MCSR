@@ -24,6 +24,7 @@ from symbolic_regression.models.expression_encoder import ExpressionEncoder
 from symbolic_regression.models.data_encoder import DataEncoder
 from symbolic_regression.training.pretrain_pipeline import PretrainPipeline
 from symbolic_regression.utils.data_loader import DataLoader
+from symbolic_regression.utils.config_utils import load_config
 
 
 
@@ -149,53 +150,7 @@ def convert_pysr_data_to_pretrain_format(pysr_data: List[Dict[str, Any]]) -> Tup
     return expressions, datasets
 
 
-def load_config(config_path: str = "config.yaml") -> Dict[str, Any]:
-    """加载配置"""
-    try:
-        import yaml
-        with open(config_path, 'r') as f:
-            return yaml.safe_load(f)
-    except:
-        # 返回默认配置
-        return {
-            'model': {
-                'expression_encoder': {
-                    'embedding_dim': 512,
-                    'n_heads': 8,
-                    'n_layers': 6,
-                    'dropout': 0.1,
-                    'max_seq_length': 128
-                },
-                'data_encoder': {
-                    'embedding_dim': 512,
-                    'n_heads': 8,
-                    'n_layers': 6,
-                    'dropout': 0.1,
-                    'max_features': 100
-                }
-            },
-            'training': {
-                'pretrain': {
-                    'n_expressions': 10000,
-                    'n_samples_per_expr': 100,
-                    'variables_range': [-5, 5],
-                    'noise_level': 0.01,
-                    'batch_size': 32,
-                    'learning_rate': 0.0001,
-                    'num_epochs': 10,
-                    'weight_decay': 0.0001,
-                    'warmup_steps': 1000,
-                    'output_dir': 'models_weights/pretrained/'
-                }
-            },
-            'data': {
-                'pretrain': {
-                    'output_path': 'data/pretrain/'
-                }
-            },
-            'device': 'cuda' if torch.cuda.is_available() else 'cpu',
-            'random_seed': 42
-        }
+
 
 
 def main():

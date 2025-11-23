@@ -334,6 +334,11 @@ class OnlineFinetuneLoop:
         target_expr: str
     ):
         """检查候选表达式是否为难负样本，如果是则加入样本池"""
+        true_embedding = None
+        candidate_embedding = None
+        true_tensor = None
+        candidate_tensor = None
+
         try:
             # 计算嵌入
             true_embedding = self.expression_encoder.encode(true_expr, training=False)
@@ -345,7 +350,7 @@ class OnlineFinetuneLoop:
             structure_sim = F.cosine_similarity(true_tensor, candidate_tensor).item()
 
             # 放宽条件：如果结构相似度中等，且准确度有一定差异
-            if structure_sim >= 0.3:  # 降低阈值，从0.8降到0.3
+            if structure_sim >= 0.5:  # 降低阈值，从0.8降到0.3
                 # 计算准确度差异
                 true_r2 = self._evaluate_r2(true_expr, X, y)
                 candidate_r2 = self._evaluate_r2(candidate_expr, X, y)
@@ -364,26 +369,13 @@ class OnlineFinetuneLoop:
                     self.hard_negative_pool.append(sample)
                     self.statistics['hard_negatives_found'] += 1
 
-                    # 如果池子还没满，降低阈值逐步收集更多样本
-                    if len(self.hard_negative_pool) < 10:
-                        self.hard_negative_threshold = max(0.1, self.hard_negative_threshold * 0.95)
-
-            # 额外条件：如果候选表达式有中等质量但结构不同，也加入池子
-            elif structure_sim >= 0.1:  # 更低的结构相似度
-                candidate_r2 = self._evaluate_r2(candidate_expr, X, y)
-                if candidate_r2 > 0.5:  # 候选表达式本身有一定质量
-                    sample = HardNegativeSample(
-                        anchor_expr=true_expr,
-                        negative_expr=candidate_expr,
-                        data_X=X,
-                        data_y=y
-                    )
-                    print(f"真实表达式：{true_expr}，准确度：{true_r2:.4f} \n添加难负样本:{candidate_expr}，准确度：{candidate_r2:.4f}\n难负样本结构相似度：{structure_sim:.4f}，准确度差异：{true_r2 - candidate_r2:.4f}")
-                    self.hard_negative_pool.append(sample)
-                    self.statistics['hard_negatives_found'] += 1
-
         except Exception as e:
             self.logger.warning(f"检查难负样本时出错: {e}")
+        finally:
+            # 清理临时张量
+            del true_embedding, candidate_embedding, true_tensor, candidate_tensor
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
     def _evaluate_r2(self, expression: str, X: np.ndarray, y: np.ndarray) -> float:
         """评估表达式的R²分数"""

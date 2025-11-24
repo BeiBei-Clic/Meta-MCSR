@@ -215,7 +215,7 @@ class OnlineFinetuneLoop:
                     target_expression=true_expr,
                     verbose=False
                 )
-
+                print(f"true_expr: {true_expr}")
                 print(f'best_expr: {best_expr}\nreward_dict: {reward_dict}\nbest_reward: {best_reward}')
 
                 # 检查是否为难负样本

@@ -702,8 +702,16 @@ class MCTSEngine:
         # 3. 准确度奖励（真实精度）
         if task_data is not None:
             X, y = task_data
-            r2_score = self._evaluate_expression_accuracy(expression, X, y)
-            reward_dict['accuracy'] = self.reward_calculator._calculate_accuracy_reward(r2_score)
+            y_pred = self._safe_eval_expression(expression, X)
+            if np.all(np.isfinite(y_pred)):
+                with np.errstate(invalid='ignore', over='ignore', under='ignore'):
+                    y_mean = np.mean(y)
+                    ss_res = np.sum((y - y_pred) ** 2)
+                    ss_tot = np.sum((y - y_mean) ** 2)
+                    if ss_tot > 1e-10:
+                        r2_ratio = np.clip(ss_res / ss_tot, 0, 1e6)
+                        r2_score = 1 - r2_ratio
+                        reward_dict['accuracy'] = self.reward_calculator._calculate_accuracy_reward(r2_score)
 
         # 4. 复杂度惩罚
         complexity = self._calculate_expression_complexity(expression)
@@ -758,39 +766,23 @@ class MCTSEngine:
         if task_data is not None and len(rollout_path) > 0:
             X, y = task_data
             try:
-                final_r2 = self._evaluate_expression_accuracy(final_expression, X, y)
-                if final_r2 > -np.inf:  # 有效值
-                    # R²分数转换为[0,1]范围
-                    accuracy_reward = max(0.0, min(1.0, final_r2))
-                    reward += 0.2 * accuracy_reward
+                y_pred = self._safe_eval_expression(final_expression, X)
+                if np.all(np.isfinite(y_pred)):
+                    with np.errstate(invalid='ignore', over='ignore', under='ignore'):
+                        y_mean = np.mean(y)
+                        ss_res = np.sum((y - y_pred) ** 2)
+                        ss_tot = np.sum((y - y_mean) ** 2)
+                        if ss_tot > 1e-10:
+                            r2_ratio = np.clip(ss_res / ss_tot, 0, 1e6)
+                            final_r2 = 1 - r2_ratio
+                            if final_r2 > -np.inf:
+                                accuracy_reward = max(0.0, min(1.0, final_r2))
+                                reward += 0.2 * accuracy_reward
             except Exception:
                 pass
         
         # 归一化到合理范围
         return min(reward, 2.0)  # 最多2.0分
-
-    def _evaluate_expression_accuracy(
-        self,
-        expression: str,
-        X: np.ndarray,
-        y: np.ndarray
-    ) -> float:
-        """评估表达式的准确度（R²分数）"""
-        y_pred = self._safe_eval_expression(expression, X)
-
-        if not np.all(np.isfinite(y_pred)):
-            return -np.inf
-
-        with np.errstate(invalid='ignore', over='ignore', under='ignore'):
-            y_mean = np.mean(y)
-            ss_res = np.sum((y - y_pred) ** 2)
-            ss_tot = np.sum((y - y_mean) ** 2)
-
-            if ss_tot <= 1e-10:
-                return 0.0 if np.allclose(y_pred, y_mean, atol=1e-6) else -np.inf
-
-            r2_ratio = np.clip(ss_res / ss_tot, 0, 1e6)
-            return 1 - r2_ratio
 
     def _safe_eval_expression(self, expression: str, X: np.ndarray) -> np.ndarray:
         """安全地求值表达式"""
@@ -800,10 +792,10 @@ class MCTSEngine:
             var_dict[f'x{i + 1}'] = X[:, i]
 
         var_dict.update({
-            'sin': lambda x: np.sin(np.clip(x, -np.pi * 4, np.pi * 4)),
-            'cos': lambda x: np.cos(np.clip(x, -np.pi * 4, np.pi * 4)),
-            'tan': lambda x: np.tan(np.clip(x, -np.pi/2 + 1e-6, np.pi/2 - 1e-6)),
-            'exp': lambda x: np.exp(np.clip(x, -50, 50)),
+            'sin': np.sin,
+            'cos': np.cos,
+            'tan': lambda x: np.clip(np.tan(x), -1e6, 1e6),
+            'exp': lambda x: np.clip(np.exp(x), -1e6, 1e6),
             'log': lambda x: np.log(np.clip(x, 1e-10, np.inf)),
             'sqrt': lambda x: np.sqrt(np.clip(x, 0, np.inf)),
             'abs': np.abs,

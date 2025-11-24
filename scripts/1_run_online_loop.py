@@ -53,15 +53,14 @@ def main():
 
     # 加载PySR数据集
     datasets = load_pysr_data("data/pysr_datasets")
-    
+
     if datasets is None:
         print("错误：无法加载数据集，程序退出")
         sys.exit(1)
-    
+
     # 转换数据格式以适配现有逻辑
-    benchmark_tasks = [(d['expression'], np.array([s[0] for s in d['samples']]),
-                       np.array([s[1] for s in d['samples']])) for d in datasets]
-    
+    benchmark_tasks = [(d['expression'], np.array([s[0] for s in d['samples']]), np.array([s[1] for s in d['samples']])) for d in datasets]
+
     print(f"加载了 {len(benchmark_tasks)} 个任务用于在线微调")
 
     # 创建在线微调循环

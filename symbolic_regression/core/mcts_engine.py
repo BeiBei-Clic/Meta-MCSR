@@ -546,42 +546,38 @@ class MCTSEngine:
     def _generate_base_extensions(self, current_expression: str) -> List[str]:
         """基于当前表达式生成基础扩展"""
         extensions = []
-        
-        # 获取变量
-        variables = self._extract_variables(current_expression)
-        
+
+        import re
+        var_pattern = r'x\d+'
+        variables = sorted(list(set(re.findall(var_pattern, current_expression))))
+
         if not variables:
             return []
-        
-        # 生成基础操作扩展
+
         if len(variables) >= 2:
             var1, var2 = random.sample(variables, 2)
         else:
             var1 = variables[0]
-            var2 = variables[0]  # 使用相同变量
-        
-        # 加法扩展
+            var2 = variables[0]
+
         extensions.append(f"({current_expression}) + {var1}")
         if len(variables) >= 2:
             extensions.append(f"({current_expression}) + {var2}")
-        
-        # 乘法扩展
+
         extensions.append(f"({current_expression}) * {var1}")
         if len(variables) >= 2:
             extensions.append(f"({current_expression}) * {var2}")
-        
-        # 函数扩展
+
         extensions.append(f"sin(({current_expression}) + {var1})")
         if len(variables) >= 2:
             extensions.append(f"cos(({current_expression}) * {var2})")
             extensions.append(f"exp(({current_expression}) / {var2})")
-        
-        # 替换扩展
+
         for var in variables:
             extensions.append(f"({current_expression}) - {var}")
             if '^' not in current_expression:
                 extensions.append(f"({current_expression})^2")
-        
+
         return extensions
 
     def _generate_template_extensions(self, feature_count: int) -> List[str]:
@@ -632,34 +628,29 @@ class MCTSEngine:
         
         return depth
 
-    def _extract_variables(self, expression: str) -> List[str]:
-        """从表达式中提取变量"""
-        variables = []
-        import re
-        
-        # 匹配 x1, x2, x3 等变量
-        var_pattern = r'x\d+'
-        matches = re.findall(var_pattern, expression)
-        
-        # 去重并排序
-        variables = sorted(list(set(matches)))
-        
-        return variables
-
     def _is_expression_too_complex(self, expression: str) -> bool:
         """检查表达式是否过于复杂"""
         # 长度检查
         if len(expression) > 100:
             return True
-        
+
         # 嵌套深度检查
-        if self._get_expression_depth(expression) > 8:
+        max_nesting = 0
+        current_nesting = 0
+        for char in expression:
+            if char == '(':
+                current_nesting += 1
+                max_nesting = max(max_nesting, current_nesting)
+            elif char == ')':
+                current_nesting -= 1
+
+        if max_nesting > 8:
             return True
-        
+
         # 括号平衡检查
         if expression.count('(') != expression.count(')'):
             return True
-        
+
         return False
 
     def _get_expression_embedding(self, expression: str) -> torch.Tensor:
@@ -803,64 +794,24 @@ class MCTSEngine:
 
     def _safe_eval_expression(self, expression: str, X: np.ndarray) -> np.ndarray:
         """安全地求值表达式"""
-        # 获取变量数量
         n_vars = X.shape[1]
-
-        # 构建变量字典
         var_dict = {}
         for i in range(n_vars):
             var_dict[f'x{i + 1}'] = X[:, i]
 
-        # 添加安全的数学函数
         var_dict.update({
-            'sin': self._safe_sin,
-            'cos': self._safe_cos,
-            'tan': self._safe_tan,
-            'exp': self._safe_exp,
-            'log': self._safe_log,
-            'sqrt': self._safe_sqrt,
+            'sin': lambda x: np.sin(np.clip(x, -np.pi * 4, np.pi * 4)),
+            'cos': lambda x: np.cos(np.clip(x, -np.pi * 4, np.pi * 4)),
+            'tan': lambda x: np.tan(np.clip(x, -np.pi/2 + 1e-6, np.pi/2 - 1e-6)),
+            'exp': lambda x: np.exp(np.clip(x, -50, 50)),
+            'log': lambda x: np.log(np.clip(x, 1e-10, np.inf)),
+            'sqrt': lambda x: np.sqrt(np.clip(x, 0, np.inf)),
             'abs': np.abs,
         })
 
-        # 处理表达式
         expr_str = expression.replace('^', '**')
-
-        # 限制eval的安全性
         safe_dict = {"__builtins__": {}}
-
-        y_pred = eval(expr_str, safe_dict, var_dict)
-
-        return y_pred
-
-    def _safe_sin(self, x):
-        """安全的sin函数"""
-        with np.errstate(invalid='ignore'):
-            return np.sin(np.clip(x, -np.pi * 4, np.pi * 4))
-
-    def _safe_cos(self, x):
-        """安全的cos函数"""
-        with np.errstate(invalid='ignore'):
-            return np.cos(np.clip(x, -np.pi * 4, np.pi * 4))
-
-    def _safe_tan(self, x):
-        """安全的tan函数"""
-        with np.errstate(invalid='ignore'):
-            return np.tan(np.clip(x, -np.pi/2 + 1e-6, np.pi/2 - 1e-6))
-
-    def _safe_exp(self, x):
-        """安全的exp函数"""
-        with np.errstate(over='ignore', under='ignore'):
-            return np.exp(np.clip(x, -50, 50))
-
-    def _safe_log(self, x):
-        """安全的log函数"""
-        with np.errstate(invalid='ignore'):
-            return np.log(np.clip(x, 1e-10, np.inf))
-
-    def _safe_sqrt(self, x):
-        """安全的sqrt函数"""
-        with np.errstate(invalid='ignore'):
-            return np.sqrt(np.clip(x, 0, np.inf))
+        return eval(expr_str, safe_dict, var_dict)
 
     def _calculate_expression_complexity(self, expression: str) -> float:
         """计算表达式复杂度"""

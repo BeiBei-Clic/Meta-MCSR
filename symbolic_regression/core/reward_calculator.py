@@ -118,12 +118,18 @@ class RewardCalculator:
         for component, weight in self.reward_weights.items():
             if component in rewards:
                 total_reward += weight * rewards[component]
-        
+
         rewards['total'] = total_reward
-        
+
         # 更新历史记录
-        self._update_reward_history(rewards)
-        
+        for component, value in rewards.items():
+            if component != 'total':
+                self.reward_history[component].append(value)
+
+                # 保持历史记录在限制范围内
+                if len(self.reward_history[component]) > self.max_history:
+                    self.reward_history[component].pop(0)
+
         return rewards
     
     def _calculate_data_alignment_reward(
@@ -206,17 +212,7 @@ class RewardCalculator:
             
         except Exception:
             return 0.0
-    
-    def _update_reward_history(self, rewards: Dict[str, float]):
-        """更新奖励历史记录"""
-        for component, value in rewards.items():
-            if component != 'total':
-                self.reward_history[component].append(value)
-                
-                # 保持历史记录在限制范围内
-                if len(self.reward_history[component]) > self.max_history:
-                    self.reward_history[component].pop(0)
-    
+
     def get_normalized_rewards(
         self,
         rewards: Dict[str, float],
@@ -224,32 +220,32 @@ class RewardCalculator:
     ) -> Dict[str, float]:
         """归一化奖励值"""
         normalized_rewards = {}
+        history = self.reward_history
 
         for component, value in rewards.items():
             if component == 'total':
                 normalized_rewards[component] = value
                 continue
 
-            history = self.reward_history.get(component, [])
-            if not history:
+            component_history = history.get(component, [])
+            if not component_history:
                 normalized_rewards[component] = value
                 continue
 
             if method == 'min_max':
-                min_val, max_val = min(history), max(history)
+                min_val, max_val = min(component_history), max(component_history)
                 normalized_rewards[component] = (value - min_val) / (max_val - min_val) if max_val > min_val else value
             elif method == 'z_score':
-                mean_val, std_val = np.mean(history), np.std(history)
+                mean_val = np.mean(component_history)
+                std_val = np.std(component_history)
                 normalized_rewards[component] = (value - mean_val) / std_val if std_val > self.epsilon else value
             elif method == 'percentile':
-                percentile_5, percentile_95 = np.percentile(history, [5, 95])
-                normalized_rewards[component] = (value - percentile_5) / (percentile_95 - percentile_5) if percentile_95 > percentile_5 else value
+                p5, p95 = np.percentile(component_history, [5, 95])
+                normalized_rewards[component] = (value - p5) / (p95 - p5) if p95 > p5 else value
             else:
                 normalized_rewards[component] = value
 
-        total_reward = sum(weight * normalized_rewards.get(comp, 0.0) for comp, weight in self.reward_weights.items())
-        normalized_rewards['total'] = total_reward
-
+        normalized_rewards['total'] = sum(self.reward_weights[c] * normalized_rewards.get(c, 0.0) for c in self.reward_weights)
         return normalized_rewards
     
     def get_reward_statistics(self) -> Dict[str, Dict[str, float]]:
@@ -280,40 +276,21 @@ class RewardCalculator:
             self.reward_history[component].clear()
     
     def adaptive_weight_adjustment(self, performance_window: int = 100):
-        """
-        自适应调整奖励权重
-        
-        Args:
-            performance_window: 性能评估窗口大小
-        """
-        # 计算最近性能窗口内各组件的平均奖励
+        """自适应调整奖励权重"""
         recent_performance = {}
-        
         for component, history in self.reward_history.items():
-            if len(history) >= performance_window:
-                recent_performance[component] = np.mean(history[-performance_window:])
-            elif history:
-                recent_performance[component] = np.mean(history)
+            if history:
+                recent_performance[component] = np.mean(history[-performance_window:] if len(history) >= performance_window else history)
             else:
                 recent_performance[component] = 0.0
-        
-        # 基于性能调整权重
-        if recent_performance:
-            # 计算每个组件的相对性能
-            total_performance = sum(recent_performance.values())
-            
-            if total_performance > 0:
-                # 重新归一化权重
-                for component in self.reward_weights:
-                    if component in recent_performance:
-                        old_weight = self.reward_weights[component]
-                        performance_ratio = recent_performance[component] / total_performance
-                        
-                        # 保留部分原始权重，进行平滑调整
-                        new_weight = 0.7 * old_weight + 0.3 * performance_ratio
-                        self.reward_weights[component] = max(0.1, new_weight)  # 最小权重为0.1
-        
-        # 归一化权重
+
+        if recent_performance and sum(recent_performance.values()) > 0:
+            for component in self.reward_weights:
+                if component in recent_performance:
+                    old_weight = self.reward_weights[component]
+                    performance_ratio = recent_performance[component] / sum(recent_performance.values())
+                    self.reward_weights[component] = max(0.1, 0.7 * old_weight + 0.3 * performance_ratio)
+
         total_weight = sum(self.reward_weights.values())
         if total_weight > 0:
             for component in self.reward_weights:

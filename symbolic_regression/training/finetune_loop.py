@@ -72,7 +72,14 @@ class OnlineFinetuneLoop:
         )
 
         # MCTS引擎
-        self.mcts_engine = self._create_mcts_engine()
+        self.mcts_engine = MCTSEngine(
+            expression_encoder=self.expression_encoder,
+            data_encoder=self.data_encoder,
+            reward_calculator=self.reward_calculator,
+            config=config.get('mcts', {}),
+            device=self.device,
+            freeze_encoders=False
+        )
 
         # 难负样本池
         self.hard_negative_pool = deque(maxlen=config.get('hard_negative_pool_size', 1000))
@@ -81,18 +88,53 @@ class OnlineFinetuneLoop:
         # 三元组损失
         self.triplet_loss = nn.TripletMarginLoss(
             margin=config.get('triplet_margin', 1.0),
-            p=2  # 欧氏距离
+            p=2
         )
         self.alignment_loss_weight = config.get('alignment_loss_weight', 0.5)
 
         # 优化器
-        self.optimizer = self._create_optimizer()
+        learning_rate = float(config.get('learning_rate', 1e-6))
+        param_groups = [
+            {'params': self.expression_encoder.parameters(), 'lr': learning_rate},
+            {'params': self.data_encoder.parameters(), 'lr': learning_rate}
+        ]
+
+        if config.get('optimizer', {}).get('type', 'adamw') == 'adamw':
+            self.optimizer = torch.optim.AdamW(
+                param_groups,
+                lr=learning_rate,
+                betas=(0.9, 0.999),
+                eps=1e-8,
+                weight_decay=float(config.get('weight_decay', 1e-4))
+            )
+        else:
+            self.optimizer = torch.optim.Adam(
+                param_groups,
+                lr=learning_rate,
+                betas=(0.9, 0.999),
+                eps=1e-8,
+                weight_decay=float(config.get('weight_decay', 1e-4))
+            )
 
         # 学习率调度器
-        self.scheduler = self._create_scheduler()
+        self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            self.optimizer,
+            mode='max',
+            factor=0.5,
+            patience=5,
+            min_lr=1e-8
+        )
 
         # 日志
-        self.logger = self._setup_logging()
+        os.makedirs('results/logs', exist_ok=True)
+        self.logger = logging.getLogger('finetune')
+        self.logger.setLevel(logging.INFO)
+        self.logger.propagate = False
+        self.logger.handlers.clear()
+        handler = logging.FileHandler('results/logs/finetune.log')
+        formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+        handler.setFormatter(formatter)
+        self.logger.addHandler(handler)
 
         # 训练状态
         self.global_step = 0
@@ -107,73 +149,6 @@ class OnlineFinetuneLoop:
             'total_losses': [],
             'mcts_rewards': [],
         }
-
-    def _create_mcts_engine(self) -> MCTSEngine:
-        """创建MCTS引擎"""
-        return MCTSEngine(
-            expression_encoder=self.expression_encoder,
-            data_encoder=self.data_encoder,
-            reward_calculator=self.reward_calculator,
-            config=self.config.get('mcts', {}),
-            device=self.device,
-            freeze_encoders=False  # 在线微调阶段不冻结编码器
-        )
-
-    def _create_optimizer(self):
-        """创建优化器"""
-        learning_rate = float(self.config.get('learning_rate', 1e-6))  # 极低学习率
-
-        param_groups = [
-            {'params': self.expression_encoder.parameters(), 'lr': learning_rate},
-            {'params': self.data_encoder.parameters(), 'lr': learning_rate}
-        ]
-
-        if self.config.get('optimizer', {}).get('type', 'adamw') == 'adamw':
-            optimizer = torch.optim.AdamW(
-                param_groups,
-                lr=learning_rate,
-                betas=(0.9, 0.999),
-                eps=1e-8,
-                weight_decay=float(self.config.get('weight_decay', 1e-4))
-            )
-        else:
-            optimizer = torch.optim.Adam(
-                param_groups,
-                lr=learning_rate,
-                betas=(0.9, 0.999),
-                eps=1e-8,
-                weight_decay=float(self.config.get('weight_decay', 1e-4))
-            )
-
-        return optimizer
-
-    def _create_scheduler(self):
-        """创建学习率调度器"""
-        return torch.optim.lr_scheduler.ReduceLROnPlateau(
-            self.optimizer,
-            mode='max',  # 监控奖励，奖励越高越好
-            factor=0.5,
-            patience=5,
-            min_lr=1e-8
-        )
-
-    def _setup_logging(self):
-        """设置日志"""
-        os.makedirs('results/logs', exist_ok=True)
-
-        logger = logging.getLogger('finetune')
-        logger.setLevel(logging.INFO)
-        logger.propagate = False
-        logger.handlers.clear()
-
-        handler = logging.FileHandler('results/logs/finetune.log')
-        formatter = logging.Formatter(
-            '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-        )
-        handler.setFormatter(formatter)
-        logger.addHandler(handler)
-
-        return logger
 
     def finetune(
         self,
@@ -414,88 +389,33 @@ class OnlineFinetuneLoop:
 
         return eval(expr_str, safe_dict, var_dict)
 
-    def _compute_finetune_loss(
-        self,
-        true_expr: str,
-        best_expr: str,
-        X: np.ndarray,
-        y: np.ndarray
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        计算微调损失（三元组损失 + 对齐损失）
-
-        Returns:
-            (triplet_loss, alignment_loss)
-        """
-        # 确保模型在训练模式
-        self.expression_encoder.train()
-        self.data_encoder.train()
-
-        # 计算嵌入
-        true_embedding = self.expression_encoder.encode(true_expr, training=True)
-        candidate_embedding = self.expression_encoder.encode(best_expr, training=True)
-
-        # 计算数据嵌入
-        X_tensor = torch.FloatTensor(X).to(self.device)
-        y_tensor = torch.FloatTensor(y).to(self.device)
-        data_embedding = self.data_encoder.encode(X_tensor, y_tensor)
-
-        # 修复：使用数据嵌入作为正样本
-        # anchor: 真实解表达式 (true_expr)
-        # positive: 数据嵌入 (期望模型生成与数据匹配的表达式)
-        # negative: MCTS候选表达式 (best_expr)
-        positive_embedding = data_embedding
-
-        # 计算三元组损失
-        # 目标：d(anchor, positive) - d(anchor, negative) + margin > 0
-        # 这鼓励模型生成更接近真实解且符合数据特征的表达式
-        triplet_loss = self.triplet_loss(
-            anchor=true_embedding,
-            positive=positive_embedding,
-            negative=candidate_embedding
-        )
-
-        # 调试输出（仅在前几步）
-        if self.global_step < 5:
-            self.logger.info(f"Step {self.global_step}:")
-            self.logger.info(f"  Triplet Loss: {triplet_loss.item():.6f}")
-            self.logger.info(f"  True Expr: {true_expr}")
-            self.logger.info(f"  Best Expr: {best_expr}")
-
-        # 在返回前清理不再需要的GPU张量（除了损失张量本身）
-        # 注意：不能清理true_embedding, candidate_embedding, positive_embedding等，
-        # 因为它们仍然被triplet_loss的计算图引用，需要用于反向传播
-        del X_tensor, y_tensor
-
-        return triplet_loss
-
-    def _compute_alignment_loss(self, expression: str, X: np.ndarray, y: np.ndarray) -> torch.Tensor:
-        """计算表达式与数据的对齐损失"""
-        expr_embedding = self.expression_encoder.encode(expression, training=True)
-
-        X_tensor = torch.FloatTensor(X).to(self.device)
-        y_tensor = torch.FloatTensor(y).to(self.device)
-        data_embedding = self.data_encoder.encode(X_tensor, y_tensor)
-
-        cosine_sim = F.cosine_similarity(
-            expr_embedding.unsqueeze(0),
-            data_embedding.unsqueeze(0)
-        )
-
-        return 1 - cosine_sim
-
     def _compute_batch_finetune_loss(self, batch_samples: List[HardNegativeSample]) -> Tuple[torch.Tensor, torch.Tensor]:
         """计算批次级别的微调损失"""
         if not batch_samples:
             return torch.tensor(0.0, device=self.device), torch.tensor(0.0, device=self.device)
 
-        losses = [self._compute_finetune_loss(s.anchor_expr, s.negative_expr, s.data_X, s.data_y)
-                 for s in batch_samples]
+        triplet_losses = []
+        for s in batch_samples:
+            self.expression_encoder.train()
+            self.data_encoder.train()
 
-        triplet_losses = losses
-        alignment_losses = [0.0] * len(losses)  # alignment loss not used currently
+            true_embedding = self.expression_encoder.encode(s.anchor_expr, training=True)
+            candidate_embedding = self.expression_encoder.encode(s.negative_expr, training=True)
 
-        return sum(triplet_losses) / len(batch_samples), sum(alignment_losses) / len(batch_samples)
+            X_tensor = torch.FloatTensor(s.data_X).to(self.device)
+            y_tensor = torch.FloatTensor(s.data_y).to(self.device)
+            data_embedding = self.data_encoder.encode(X_tensor, y_tensor)
+
+            triplet_loss = self.triplet_loss(
+                anchor=true_embedding,
+                positive=data_embedding,
+                negative=candidate_embedding
+            )
+
+            triplet_losses.append(triplet_loss)
+            del X_tensor, y_tensor
+
+        return sum(triplet_losses) / len(batch_samples), torch.tensor(0.0, device=self.device)
 
     def _validate(self, val_tasks: List[Tuple[str, np.ndarray, np.ndarray]]) -> Dict[str, float]:
         """验证模型性能"""

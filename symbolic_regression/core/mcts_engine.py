@@ -202,9 +202,6 @@ class MCTSEngine:
         self.allowed_operators = config.get('allowed_operators', [
             '+', '-', '*', '/', '^'
         ])
-        self.allowed_functions = config.get('allowed_functions', [
-            'sin', 'cos', 'tan', 'log', 'ln', 'exp', 'sqrt', 'abs'
-        ])
 
         # 预定义表达式模板（用于快速扩展）
         self.expression_templates = config.get('expression_templates', [
@@ -442,7 +439,6 @@ class MCTSEngine:
         target_expression: Optional[str],
         task_data: Optional[Tuple[np.ndarray, np.ndarray]]
     ) -> Tuple[float, Dict[str, float]]:
-        """模拟步骤：通过rollout评估表达式的奖励"""
         if task_data:
             X, y = task_data
             feature_count = X.shape[1]
@@ -469,13 +465,17 @@ class MCTSEngine:
 
         expr_embedding = self._get_expression_embedding(rollout_expression)
 
-        total_reward, reward_dict = self._calculate_reward(
+        target_embedding = None
+        if target_expression is not None:
+            target_embedding = self._get_expression_embedding(target_expression)
+
+        total_reward, reward_dict = self.reward_calculator.calculate_reward(
             rollout_expression,
-            expr_embedding,
-            local_task_embedding,
-            target_expression,
+            expr_embedding.detach().cpu().numpy(),
+            local_task_embedding.detach().cpu().numpy(),
+            target_embedding.detach().cpu().numpy(),
             task_data,
-            rollout_path=rollout_path
+            rollout_path
         )
 
         return total_reward, reward_dict
@@ -661,181 +661,6 @@ class MCTSEngine:
                 return self.expression_encoder.encode(expression, training=False)
         return self.expression_encoder.encode(expression, training=True)
 
-    def _calculate_reward(
-        self,
-        expression: str,
-        expr_embedding: torch.Tensor,
-        task_embedding: Optional[torch.Tensor],
-        target_expression: Optional[str],
-        task_data: Optional[Tuple[np.ndarray, np.ndarray]],
-        rollout_path: Optional[List[str]] = None
-    ) -> Tuple[float, Dict[str, float]]:
-        """计算复合奖励
-        
-        Returns:
-            (总奖励, 奖励分解字典)
-        """
-        reward_dict = {
-            'accuracy': 0.0,
-            'data_alignment': 0.0,
-            'structure_alignment': 0.0,
-            'complexity': 0.0,
-            'stability': 0.0,
-            'rollout_reward': 0.0
-        }
-
-        # 1. 数据对齐奖励
-        if task_embedding is not None:
-            reward_dict['data_alignment'] = self.reward_calculator._calculate_data_alignment_reward(
-                expr_embedding.detach().cpu().numpy(),
-                task_embedding.detach().cpu().numpy()
-            )
-
-        # 2. 结构对齐奖励（仅在微调阶段使用）
-        if target_expression is not None:
-            target_embedding = self._get_expression_embedding(target_expression)
-            reward_dict['structure_alignment'] = self.reward_calculator._calculate_structure_alignment_reward(
-                expr_embedding.detach().cpu().numpy(),
-                target_embedding.detach().cpu().numpy()
-            )
-
-        # 3. 准确度奖励（真实精度）
-        if task_data is not None:
-            X, y = task_data
-            y_pred = self._safe_eval_expression(expression, X)
-            if np.all(np.isfinite(y_pred)):
-                with np.errstate(invalid='ignore', over='ignore', under='ignore'):
-                    y_mean = np.mean(y)
-                    ss_res = np.sum((y - y_pred) ** 2)
-                    ss_tot = np.sum((y - y_mean) ** 2)
-                    if ss_tot > 1e-10:
-                        r2_ratio = np.clip(ss_res / ss_tot, 0, 1e6)
-                        r2_score = 1 - r2_ratio
-                        reward_dict['accuracy'] = self.reward_calculator._calculate_accuracy_reward(r2_score)
-
-        # 4. 复杂度惩罚
-        complexity = self._calculate_expression_complexity(expression)
-        reward_dict['complexity'] = self.reward_calculator._calculate_complexity_penalty(complexity)
-
-        # 5. Rollout奖励（新功能）
-        if rollout_path is not None:
-            reward_dict['rollout_reward'] = self._calculate_rollout_reward(rollout_path, task_data)
-
-        # 计算总奖励
-        total_reward = 0.0
-        for component, weight in self.reward_calculator.reward_weights.items():
-            if component in reward_dict:
-                total_reward += weight * reward_dict[component]
-
-        # 如果有rollout奖励，给予额外权重
-        if rollout_path is not None:
-            rollout_weight = self.config.get('rollout_weight', 0.2)
-            total_reward += rollout_weight * reward_dict['rollout_reward']
-
-        return total_reward, reward_dict
-
-    def _calculate_rollout_reward(self, rollout_path: List[str], task_data: Optional[Tuple[np.ndarray, np.ndarray]]) -> float:
-        """计算rollout奖励
-        
-        基于rollout路径的完整性和最终表达能力
-        """
-        if len(rollout_path) < 2:
-            return 0.0
-        
-        reward = 0.0
-        
-        # 1. 路径长度奖励（鼓励探索）
-        path_length_reward = min(len(rollout_path) / 10.0, 1.0)  # 归一化到[0,1]
-        reward += 0.3 * path_length_reward
-        
-        # 2. 路径多样性奖励（鼓励表达式的多样性）
-        unique_expressions = len(set(rollout_path))
-        diversity_reward = unique_expressions / len(rollout_path)  # [0,1]
-        reward += 0.2 * diversity_reward
-        
-        # 3. 最终表达式复杂度奖励（适中复杂度的表达式得分更高）
-        final_expression = rollout_path[-1]
-        complexity = self._calculate_expression_complexity(final_expression)
-        
-        # 理想的复杂度范围（根据任务调整）
-        optimal_complexity = 50.0
-        complexity_reward = max(0.0, 1.0 - abs(complexity - optimal_complexity) / optimal_complexity)
-        reward += 0.3 * complexity_reward
-        
-        # 4. 如果有任务数据，评估最终表达式的准确度
-        if task_data is not None and len(rollout_path) > 0:
-            X, y = task_data
-            try:
-                y_pred = self._safe_eval_expression(final_expression, X)
-                if np.all(np.isfinite(y_pred)):
-                    with np.errstate(invalid='ignore', over='ignore', under='ignore'):
-                        y_mean = np.mean(y)
-                        ss_res = np.sum((y - y_pred) ** 2)
-                        ss_tot = np.sum((y - y_mean) ** 2)
-                        if ss_tot > 1e-10:
-                            r2_ratio = np.clip(ss_res / ss_tot, 0, 1e6)
-                            final_r2 = 1 - r2_ratio
-                            if final_r2 > -np.inf:
-                                accuracy_reward = max(0.0, min(1.0, final_r2))
-                                reward += 0.2 * accuracy_reward
-            except Exception:
-                pass
-        
-        # 归一化到合理范围
-        return min(reward, 2.0)  # 最多2.0分
-
-    def _safe_eval_expression(self, expression: str, X: np.ndarray) -> np.ndarray:
-        """安全地求值表达式"""
-        n_vars = X.shape[1]
-        var_dict = {}
-        for i in range(n_vars):
-            var_dict[f'x{i + 1}'] = X[:, i]
-
-        var_dict.update({
-            'sin': np.sin,
-            'cos': np.cos,
-            'tan': lambda x: np.clip(np.tan(x), -1e6, 1e6),
-            'exp': lambda x: np.clip(np.exp(x), -1e6, 1e6),
-            'log': lambda x: np.log(np.clip(x, 1e-10, np.inf)),
-            'sqrt': lambda x: np.sqrt(np.clip(x, 0, np.inf)),
-            'abs': np.abs,
-        })
-
-        expr_str = expression.replace('^', '**')
-        safe_dict = {"__builtins__": {}}
-        return eval(expr_str, safe_dict, var_dict)
-
-    def _calculate_expression_complexity(self, expression: str) -> float:
-        """计算表达式复杂度"""
-        complexity = 0.0
-
-        # 基础复杂度：token数量
-        complexity += len(expression)
-
-        # 运算符复杂度
-        for op in ['+', '-', '*', '/', '^']:
-            complexity += expression.count(op) * 1.0
-
-        # 函数复杂度
-        for func in self.allowed_functions:
-            complexity += expression.count(func) * 2.0
-
-        # 括号复杂度
-        complexity += expression.count('(') * 0.5
-
-        # 嵌套复杂度（粗略估计）
-        max_nesting = 0
-        current_nesting = 0
-        for char in expression:
-            if char == '(':
-                current_nesting += 1
-                max_nesting = max(max_nesting, current_nesting)
-            elif char == ')':
-                current_nesting -= 1
-
-        complexity += max_nesting * 2.0
-
-        return complexity
 
     def _backpropagate(
         self,

@@ -33,7 +33,6 @@ class RewardCalculator:
             'data_alignment': 0.4,
             'accuracy': 0.3,
             'complexity': 0.05,
-            'stability': 0.05,
             'rollout_reward': 0.2
         }
         
@@ -59,78 +58,6 @@ class RewardCalculator:
             'rollout_reward': []
         }
         self.max_history = 1000
-    
-    def calculate_composite_reward(
-        self,
-        expr_embedding: np.ndarray,
-        data_embedding: np.ndarray,
-        target_expr_embedding: Optional[np.ndarray] = None,
-        predicted_values: Optional[np.ndarray] = None,
-        true_values: Optional[np.ndarray] = None,
-        r2_score: float = -np.inf,
-        complexity: float = 0.0,
-        expression_str: Optional[str] = None
-    ) -> Dict[str, float]:
-        """
-        计算复合奖励
-        
-        Args:
-            expr_embedding: 表达式嵌入向量
-            data_embedding: 数据嵌入向量
-            target_expr_embedding: 目标表达式嵌入向量（真实解）
-            predicted_values: 预测值
-            true_values: 真实值
-            r2_score: R2分数
-            complexity: 表达式复杂度
-            expression_str: 表达式字符串
-            
-        Returns:
-            包含各部分奖励和总奖励的字典
-        """
-        rewards = {}
-        
-        # 1. 数据对齐奖励
-        rewards['data_alignment'] = self._calculate_data_alignment_reward(
-            expr_embedding, data_embedding
-        )
-        
-        # 2. 结构对齐奖励
-        rewards['structure_alignment'] = self._calculate_structure_alignment_reward(
-            expr_embedding, target_expr_embedding
-        )
-        
-        # 3. 准确度奖励
-        rewards['accuracy'] = self._calculate_accuracy_reward(r2_score)
-        
-        # 4. 复杂度奖励（可选，用于惩罚过复杂的表达式）
-        rewards['complexity'] = self._calculate_complexity_penalty(complexity)
-        
-        # 5. 稳定性奖励（可选，用于奖励表达式的数值稳定性）
-        rewards['stability'] = self._calculate_stability_reward(
-            predicted_values, true_values
-        )
-        
-        # 6. Rollout奖励（新增，用于奖励完整的搜索轨迹）
-        rewards['rollout_reward'] = 0.0  # 默认值，具体值由MCTS引擎传入
-        
-        # 计算加权总奖励
-        total_reward = 0.0
-        for component, weight in self.reward_weights.items():
-            if component in rewards:
-                total_reward += weight * rewards[component]
-
-        rewards['total'] = total_reward
-
-        # 更新历史记录
-        for component, value in rewards.items():
-            if component != 'total':
-                self.reward_history[component].append(value)
-
-                # 保持历史记录在限制范围内
-                if len(self.reward_history[component]) > self.max_history:
-                    self.reward_history[component].pop(0)
-
-        return rewards
     
     def _calculate_data_alignment_reward(
         self,
@@ -182,36 +109,6 @@ class RewardCalculator:
         complexity_penalty = -0.1 * math.exp(complexity / max_complexity)
         
         return complexity_penalty
-    
-    def _calculate_stability_reward(
-        self, 
-        predicted_values: Optional[np.ndarray] = None, 
-        true_values: Optional[np.ndarray] = None
-    ) -> float:
-        """计算数值稳定性奖励"""
-        if predicted_values is None or true_values is None:
-            return 0.0
-            
-        try:
-            # 计算预测值的方差
-            pred_var = np.var(predicted_values)
-            true_var = np.var(true_values)
-            
-            # 计算稳定性指标（预测值方差与真实值方差的比值）
-            stability_ratio = pred_var / (true_var + self.epsilon)
-            
-            # 计算稳定性奖励（1表示稳定，>1表示不稳定）
-            if stability_ratio <= 1.5:  # 允许一些波动
-                stability_reward = 0.1
-            elif stability_ratio <= 3.0:
-                stability_reward = 0.05
-            else:
-                stability_reward = 0.0
-            
-            return stability_reward
-            
-        except Exception:
-            return 0.0
 
     def get_normalized_rewards(
         self,
@@ -276,7 +173,6 @@ class RewardCalculator:
             self.reward_history[component].clear()
     
     def adaptive_weight_adjustment(self, performance_window: int = 100):
-        """自适应调整奖励权重"""
         recent_performance = {}
         for component, history in self.reward_history.items():
             if history:
@@ -295,3 +191,134 @@ class RewardCalculator:
         if total_weight > 0:
             for component in self.reward_weights:
                 self.reward_weights[component] /= total_weight
+
+    def calculate_reward(
+        self,
+        expression: str,
+        expr_embedding: np.ndarray,
+        task_embedding: Optional[np.ndarray] = None,
+        target_embedding: Optional[np.ndarray] = None,
+        task_data: Optional[Tuple[np.ndarray, np.ndarray]] = None,
+        rollout_path: Optional[List[str]] = None
+    ) -> Tuple[float, Dict[str, float]]:
+        reward_dict = {
+            'accuracy': 0.0,
+            'data_alignment': 0.0,
+            'structure_alignment': 0.0,
+            'complexity': 0.0,
+            'stability': 0.0,
+            'rollout_reward': 0.0
+        }
+
+        if task_embedding is not None:
+            reward_dict['data_alignment'] = self._calculate_data_alignment_reward(
+                expr_embedding, task_embedding
+            )
+
+        if target_embedding is not None:
+            reward_dict['structure_alignment'] = self._calculate_structure_alignment_reward(
+                expr_embedding, target_embedding
+            )
+
+        if task_data is not None:
+            X, y = task_data
+            y_pred = self._safe_eval_expression(expression, X)
+            if np.all(np.isfinite(y_pred)):
+                y_mean = np.mean(y)
+                ss_res = np.sum((y - y_pred) ** 2)
+                ss_tot = np.sum((y - y_mean) ** 2)
+                if ss_tot > 1e-10:
+                    r2_ratio = np.clip(ss_res / ss_tot, 0, 1e6)
+                    r2_score = 1 - r2_ratio
+                    reward_dict['accuracy'] = self._calculate_accuracy_reward(r2_score)
+
+        complexity = self._calculate_expression_complexity(expression)
+        reward_dict['complexity'] = self._calculate_complexity_penalty(complexity)
+
+        if rollout_path is not None:
+            reward_dict['rollout_reward'] = self._calculate_rollout_reward(rollout_path, task_data)
+
+        total_reward = sum(self.reward_weights[c] * reward_dict[c] for c in reward_dict if c in self.reward_weights)
+
+        return total_reward, reward_dict
+
+    def _calculate_rollout_reward(
+        self,
+        rollout_path: List[str],
+        task_data: Optional[Tuple[np.ndarray, np.ndarray]] = None
+    ) -> float:
+        if len(rollout_path) < 2:
+            return 0.0
+
+        reward = 0.0
+        path_length_reward = min(len(rollout_path) / 10.0, 1.0)
+        reward += 0.3 * path_length_reward
+
+        unique_expressions = len(set(rollout_path))
+        diversity_reward = unique_expressions / len(rollout_path)
+        reward += 0.2 * diversity_reward
+
+        final_expression = rollout_path[-1]
+        complexity = self._calculate_expression_complexity(final_expression)
+        optimal_complexity = 50.0
+        complexity_reward = max(0.0, 1.0 - abs(complexity - optimal_complexity) / optimal_complexity)
+        reward += 0.3 * complexity_reward
+
+        if task_data is not None:
+            X, y = task_data
+            try:
+                y_pred = self._safe_eval_expression(final_expression, X)
+                if np.all(np.isfinite(y_pred)):
+                    y_mean = np.mean(y)
+                    ss_res = np.sum((y - y_pred) ** 2)
+                    ss_tot = np.sum((y - y_mean) ** 2)
+                    if ss_tot > 1e-10:
+                        r2_ratio = np.clip(ss_res / ss_tot, 0, 1e6)
+                        final_r2 = 1 - r2_ratio
+                        if final_r2 > -np.inf:
+                            accuracy_reward = max(0.0, min(1.0, final_r2))
+                            reward += 0.2 * accuracy_reward
+            except:
+                pass
+
+        return min(reward, 2.0)
+
+    def _calculate_expression_complexity(self, expression: str) -> float:
+        complexity = len(expression)
+        for op in ['+', '-', '*', '/', '^']:
+            complexity += expression.count(op) * 1.0
+        for func in ['sin', 'cos', 'tan', 'log', 'ln', 'exp', 'sqrt', 'abs']:
+            complexity += expression.count(func) * 2.0
+        complexity += expression.count('(') * 0.5
+
+        max_nesting = 0
+        current_nesting = 0
+        for char in expression:
+            if char == '(':
+                current_nesting += 1
+                max_nesting = max(max_nesting, current_nesting)
+            elif char == ')':
+                current_nesting -= 1
+
+        complexity += max_nesting * 2.0
+        return complexity
+
+    def _safe_eval_expression(self, expression: str, X: np.ndarray) -> np.ndarray:
+        n_vars = X.shape[1]
+        var_dict = {}
+        for i in range(n_vars):
+            var_dict[f'x{i + 1}'] = X[:, i]
+
+        var_dict.update({
+            'sin': np.sin,
+            'cos': np.cos,
+            'tan': lambda x: np.clip(np.tan(x), -1e6, 1e6),
+            'exp': lambda x: np.clip(np.exp(x), -1e6, 1e6),
+            'log': lambda x: np.log(np.clip(x, 1e-10, np.inf)),
+            'sqrt': lambda x: np.sqrt(np.clip(x, 0, np.inf)),
+            'abs': np.abs,
+        })
+
+        expr_str = expression.replace('^', '**')
+        safe_dict = {"__builtins__": {}}
+        return eval(expr_str, safe_dict, var_dict)

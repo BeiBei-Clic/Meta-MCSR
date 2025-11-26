@@ -15,7 +15,16 @@ import scipy.special
 import copy
 from logging import getLogger
 import time
-from numpy.compat.py3k import npy_load_module
+try:
+    from numpy.compat.py3k import npy_load_module
+except ImportError:
+    # For newer numpy versions where compat.py3k was removed
+    import importlib.util
+    def npy_load_module(name, path):
+        spec = importlib.util.spec_from_file_location(name, path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
 from sympy import Min
 from snip.envs import encoders
 from collections import defaultdict

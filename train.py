@@ -84,12 +84,14 @@ def main(params):
                 task = params.tasks[task_id]
                 if params.export_data:
                     trainer.export_data(task)
+                    # Fix: increment inner_epoch for export_data mode
+                    trainer.inner_epoch += 1
                 else:
                     if params.is_proppred:
                         samples, loss , target_property = trainer.enc_dec_step(task)
                     else:
                         encoded_f, encoded_y, samples, loss = trainer.enc_dec_step(task)
-    
+
                 trainer.iter()
                 
         logger.info("============ End of epoch %i ============" % trainer.epoch)

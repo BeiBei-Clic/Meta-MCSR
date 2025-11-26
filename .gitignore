@@ -1,4 +1,3 @@
-.venv
-SR4MDL
-result
-nd2py_package
+weights
+dump
+__pycache__

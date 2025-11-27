@@ -41,7 +41,6 @@ def main(params):
     task = params.tasks[0]  # Use first task
 
     # Display dataset information
-    print(f"Dataset information:")
     print(f"- Task: {task}")
     print(f"- Eval data path: {params.eval_data}")
     print(f"- Max input dimension: {params.max_input_dimension}")

@@ -144,3 +144,16 @@ This work is built on top of other open source projects, including [Deep Learnin
 
 ## Contact Us
 For any questions or issues, you are welcome to open an issue in this repo, or contact us at mmeidani@andrew.cmu.edu, and parshinshojaee@vt.edu.
+
+#### 计算表达式与数据点对嵌入相似度
+```bash
+python similarity_calculator.py \
+            --eval_only true \
+            --tasks functions \
+            --eval_from_exp weights/snip-10dmax.pth \
+            --eval_data dump/test_data/data.prefix \
+            --dump_path ./eval_output \
+            --max_input_dimension 10 \
+            --max_output_dimension 1 \
+            --latent_dim 512
+```

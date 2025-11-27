@@ -10,6 +10,14 @@ import math
 import os
 import json
 import functools
+import sys
+import torch
+
+# 导入相似度计算器
+from src.snip_similarity_calculator import SimilarityCalculator
+import snip
+from snip.model import check_model_params, build_modules
+from snip.envs import build_env
 
 # 设置随机种子
 random.seed(42)
@@ -18,6 +26,260 @@ np.random.seed(42)
 # 全局变量，避免重复创建类
 _fitness_created = False
 _individual_created = False
+_similarity_calculator = None
+
+def tree_to_prefix_string(tree):
+    """将DEAP的树结构转换为前序遍历字符串"""
+    def traverse(node):
+        if isinstance(node, gp.Primitive):
+            # 操作符节点
+            args = [traverse(child) for child in node.args]
+            if len(args) == 1:
+                return f"{node.name},{args[0]}"
+            else:
+                return f"{node.name}," + ",".join(args)
+        elif isinstance(node, gp.Terminal):
+            # 终端节点（变量或常数）
+            if isinstance(node.value, str):
+                # 变量
+                return node.value
+            else:
+                # 常数
+                return str(node.value)
+        else:
+            return str(node)
+
+    return traverse(tree)
+
+def tree_to_prefix_tokens(tree):
+    """将DEAP的树结构转换为前序遍历token列表"""
+    tokens = []
+    def traverse(node):
+        if isinstance(node, gp.Primitive):
+            # 操作符节点
+            tokens.append(node.name)
+            for child in node.args:
+                traverse(child)
+        elif isinstance(node, gp.Terminal):
+            # 终端节点（变量或常数）
+            if isinstance(node.value, str):
+                # 变量
+                tokens.append(node.value)
+            else:
+                # 常数
+                tokens.append(str(node.value))
+
+    traverse(tree)
+    return tokens
+
+class SimpleTree:
+    """简单树类，模拟SNIP需要的树结构"""
+    def __init__(self, prefix_str):
+        self.prefix_str = prefix_str
+        self._prefix_tokens = prefix_str.split(',')
+
+    def prefix(self):
+        return self.prefix_str
+
+def create_snip_compatible_data(X_data, y_data, tree_str):
+    """创建与SNIP兼容的数据格式"""
+    # 创建简单树对象
+    tree_obj = SimpleTree(tree_str)
+
+    # 简化统计（与test_data格式一致）
+    tree_tokens = tree_str.split(',')
+    n_unary_ops = str(tree_tokens.count('sqrt') + tree_tokens.count('log') +
+                         tree_tokens.count('sin') + tree_tokens.count('cos') +
+                         tree_tokens.count('neg') + tree_tokens.count('inv'))
+    n_binary_ops = str(tree_tokens.count('add') + tree_tokens.count('sub') +
+                          tree_tokens.count('mul') + tree_tokens.count('div') +
+                          tree_tokens.count('pow'))
+
+    # 创建正确的数据格式：x_to_fit是二维数组，每行是一个数据点
+    x_to_fit = []
+    for i in range(len(X_data)):
+        row = []
+        for j in range(X_data.shape[1]):
+            row.append(f"{X_data[i, j]:.6e}")
+        x_to_fit.append(row)
+
+    # y_to_fit也是二维数组，每行是一个目标值
+    y_to_fit = [[f"{y:.6e}"] for y in y_data]
+
+    # 创建简化的数据格式，类似于dump/test_data/data.prefix的格式
+    data = {
+        "n_input_points": str(len(X_data)),
+        "n_unary_ops": n_unary_ops,
+        "n_binary_ops": n_binary_ops,
+        "d_in": str(X_data.shape[1]),
+        "d_out": "1",
+        "input_distribution_type": "0",
+        "n_centroids": "1",
+        "x_to_fit": x_to_fit,
+        "y_to_fit": y_to_fit,
+        "tree": tree_str  # 使用字符串而不是树对象
+    }
+    return data
+
+def setup_similarity_calculator():
+    """设置相似度计算器"""
+    global _similarity_calculator
+
+    if _similarity_calculator is not None:
+        return _similarity_calculator
+
+    # 创建基本参数，与命令行参数保持一致
+    class SimpleParams:
+        def __init__(self):
+            # 基本设置 - 与命令行参数匹配
+            self.cpu = False  # 使用GPU进行计算
+            self.eval_only = True
+            self.tasks = ["functions"]
+            self.eval_from_exp = "weights/snip-10dmax.pth"
+            self.eval_data = "/tmp/temp_gp_data.json"
+            self.dump_path = "./eval_output"
+            self.max_input_dimension = 10
+            self.max_output_dimension = 1
+
+            # 关键参数：latent_dim需要与模型匹配（设置为512）
+            self.latent_dim = 512
+
+            # 添加必需的SNIP参数 - 与parsers.py保持一致
+            self.env_name = "functions"
+            self.emb_dim = 256
+            self.emb_enc_hidden_dim = 256
+            self.emb_enc_layers = 3
+            self.transformer_layers = 6
+            self.transformer_heads = 8
+            self.ffn_dim = 1024
+
+            # 任务参数 - 应该是字符串而不是列表
+            self.tasks = "functions"
+
+            # 添加parsers.py中的必要参数
+            self.fp16 = False
+            self.embedder_type = "LinearPoint"
+            self.normalize_y = False
+            self.bt_lambda = 0.0051
+            self.load_encoder = False
+            self.freeze_encoder = False
+            self.emb_emb_dim = 64
+            self.enc_emb_dim = 512
+            self.dec_emb_dim = 512
+            self.n_emb_layers = 1
+            self.n_enc_layers = 8
+            self.n_dec_layers = 8
+            self.n_enc_heads = 16
+            self.n_dec_heads = 16
+            self.emb_expansion_factor = 1
+            self.n_enc_hidden_layers = 1
+            self.n_dec_hidden_layers = 1
+            self.norm_attention = False
+            self.dropout = 0
+            self.attention_dropout = 0
+            self.share_inout_emb = True
+            self.enc_positional_embeddings = "learnable"
+            self.dec_positional_embeddings = "learnable"
+            self.loss_type = "CLIP"
+            self.contrastive_weight = 1.0
+            self.max_src_len = 200
+            self.max_target_len = 200
+            self.batch_size = 32
+            self.batch_size_eval = 32
+
+            # 训练参数（对于评估不重要）
+            self.learning_rate = 1e-4
+            self.n_steps = 1000
+            self.eval_steps = 100
+
+            # 环境参数 - 来自snip/envs/environment.py的默认值
+            self.float_precision = 3
+            self.mantissa_len = 1
+            self.max_exponent = 100
+            self.max_exponent_prefactor = 10
+            self.split_with_train_validation = False
+
+            # 生成器参数
+            self.prob_const = 0.0
+            self.prob_rand = 0.0
+            self.max_int = 10
+            self.min_binary_ops_per_dim = 0
+            self.max_binary_ops_per_dim = 1
+            self.max_binary_ops_offset = 4
+            self.min_unary_ops = 0
+            self.max_unary_ops = 4
+            self.min_input_dimension = 1
+            self.min_output_dimension = 1
+
+            # 其他环境参数
+            self.use_skeleton = False
+            self.queue_strategy = None
+            self.collate_queue_size = 2000
+            self.use_sympy = False
+            self.simplify = False
+            self.use_abs = False
+            self.operators_to_downsample = "div_0,arcsin_0,arccos_0,tan_0.2,arctan_0.2,sqrt_5,pow2_3,inv_3"
+            self.operators_to_not_repeat = ""
+            self.max_unary_depth = 6
+            self.required_operators = ""
+            self.extra_unary_operators = ""
+            self.extra_binary_operators = ""
+            self.extra_constants = None
+            self.enforce_dim = True
+            self.use_controller = True
+            self.max_token_len = 0
+            self.tokens_per_batch = 10000
+            self.pad_to_max_dim = True
+            self.max_len = 200
+            self.min_op_prob = 0.01
+            self.n_input_points_LSO = 1000
+            self.min_len_per_dim = 5
+            self.max_centroids = 10
+            self.reduce_num_constants = True
+            self.max_trials = 1
+            self.n_prediction_points = 200
+            self.prediction_sigmas = "1,2,4,8,16"
+
+            # 系统参数 - 来自parsers.py
+            self.local_rank = -1
+            self.master_port = -1
+            self.windows = False
+            self.nvidia_apex = False
+
+            # 环境种子参数
+            self.env_base_seed = 0
+            self.test_env_seed = 1
+
+            # 数据加载参数
+            self.batch_load = False
+            self.reload_size = -1
+
+            # 其他必需的参数
+            self.num_workers = 0
+            self.n_gpu_per_node = 1
+            self.global_rank = 0
+            self.n_steps_per_epoch = 1000
+            self.train_noise_gamma = 0.0
+            self.eval_noise_gamma = 0.0
+            self.eval_input_length_modulo = -1
+
+            # 其他可能需要的参数
+            self.is_proppred = False
+            self.property_type = None
+            self.reload_model = ""  # 使用空字符串而不是None
+            self.reload_checkpoint = ""
+
+    params = SimpleParams()
+
+    # 检查必需的参数
+    check_model_params(params)
+
+    # 创建环境和模块
+    env = build_env(params)
+    modules = build_modules(env, params)
+    _similarity_calculator = SimilarityCalculator(modules, env, params)
+    print("相似度计算器初始化成功")
+    return _similarity_calculator
 
 def protected_div(left, right):
     """保护除法，避免除零错误"""
@@ -80,7 +342,7 @@ def load_and_preprocess_data(dataset_name, sample_size=1000):
     print(f"正在加载数据集: {dataset_name}")
     
     # 构建数据文件路径
-    data_path = f'dataset/{dataset_name}'
+    data_path = f'dump/dataset/{dataset_name}'
     
     # 读取指定数量的数据
     data = []
@@ -101,18 +363,8 @@ def load_and_preprocess_data(dataset_name, sample_size=1000):
     num_cols = data.shape[1]
     print(f"数据形状: {data.shape}, 列数: {num_cols}")
     
-    if num_cols == 2:
-        # 只有2列：输入和输出
-        X = data[:, :1]  # 第一列作为输入特征
-        y = data[:, 1]   # 第二列作为目标值
-        # 为了保持一致性，复制第一列作为第二个特征
-        X = np.column_stack([X.flatten(), X.flatten()])
-    elif num_cols >= 3:
-        # 3列或更多：前两列作为输入，最后一列作为输出
-        X = data[:, :2]  # 前两列作为输入特征
-        y = data[:, -1]  # 最后一列作为目标值
-    else:
-        raise ValueError(f"数据集 {dataset_name} 格式错误：列数不足")
+    X = data[:, :-2]  # 前两列作为输入特征
+    y = data[:, -1]  # 最后一列作为目标值
     
     print(f"处理后数据形状: X={X.shape}, y={y.shape}")
     
@@ -188,29 +440,36 @@ def setup_toolbox(pset, Individual):
     
     return toolbox
 
-def evaluate_individual(individual, toolbox, X_train, y_train):
-    """评估个体的适应度（RMSE）"""
-    # 编译个体为可调用函数
-    func = toolbox.compile(expr=individual)
-    
-    # 计算预测值
-    predictions = []
-    for i in range(len(X_train)):
-        try:
-            pred = func(X_train[i, 0], X_train[i, 1])
-            # 检查结果是否为有效数值
-            if math.isnan(pred) or math.isinf(pred):
-                pred = 0.0
-            predictions.append(pred)
-        except:
-            predictions.append(0.0)
-    
-    predictions = np.array(predictions)
-    
-    # 计算RMSE
-    rmse = np.sqrt(mean_squared_error(y_train, predictions))
-    
-    return rmse,
+def evaluate_individual_with_similarity(individual, toolbox, X_train, y_train, similarity_calculator):
+    """使用相似度计算器评估个体的适应度"""
+    # 将树转换为前序遍历字符串
+    tree_str = tree_to_prefix_string(individual)
+
+    # 创建兼容的数据格式
+    data_dict = create_snip_compatible_data(X_train, y_train, tree_str)
+
+    # 创建临时数据文件
+    temp_file = "/tmp/temp_gp_data.json"
+    import json
+    with open(temp_file, 'w') as f:
+        json.dump(data_dict, f)
+
+    # 使用相似度计算器
+    similarity_matrix = similarity_calculator.enc_dec_step(
+        "functions",
+        data_path={"functions": [temp_file]}
+    )
+
+    # 清理临时文件
+    os.remove(temp_file)
+
+    # 从相似度矩阵中提取适应度值
+    # 相似度越高，适应度越好（注意适应度是最小化的）
+    if similarity_matrix is not None and similarity_matrix.numel() > 0:
+        # 取平均相似度，转换为距离（1 - similarity）作为适应度
+        avg_similarity = similarity_matrix.mean().item()
+        fitness = 1.0 - max(0.0, min(1.0, avg_similarity))  # 确保在[0,1]范围内
+        return fitness,
 
 def run_genetic_programming(dataset_name, sample_size=1000, population_size=300, generations=100, random_seed=42):
     """运行遗传编程算法"""
@@ -227,10 +486,13 @@ def run_genetic_programming(dataset_name, sample_size=1000, population_size=300,
     pset = setup_gp()
     Individual = create_fitness_and_individual(pset)
     toolbox = setup_toolbox(pset, Individual)
-    
+
+    # 初始化相似度计算器
+    similarity_calculator = setup_similarity_calculator()
+
     # 注册评估函数
-    toolbox.register("evaluate", evaluate_individual, toolbox=toolbox, 
-                    X_train=X_train, y_train=y_train)
+    toolbox.register("evaluate", evaluate_individual_with_similarity, toolbox=toolbox,
+                    X_train=X_train, y_train=y_train, similarity_calculator=similarity_calculator)
     
     # 注册遗传算子
     toolbox.register("select", tools.selTournament, tournsize=3)

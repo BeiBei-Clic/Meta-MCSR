@@ -28,6 +28,10 @@ def main(params):
         params.local_rank = -1
     if not hasattr(params, 'master_port'):
         params.master_port = -1
+    if not hasattr(params, 'n_gpu_per_node'):
+        params.n_gpu_per_node = 1
+    if not hasattr(params, 'n_steps_per_epoch'):
+        params.n_steps_per_epoch = 1000
 
     env = build_env(params)
     modules = build_modules(env, params)
@@ -35,7 +39,16 @@ def main(params):
 
     # Calculate similarity matrix
     task = params.tasks[0]  # Use first task
-    similarity_matrix = similarity_calculator.enc_dec_step(task)
+
+    # Display dataset information
+    print(f"Dataset information:")
+    print(f"- Task: {task}")
+    print(f"- Eval data path: {params.eval_data}")
+    print(f"- Max input dimension: {params.max_input_dimension}")
+    print(f"- Max output dimension: {params.max_output_dimension}")
+
+    similarity_matrix = similarity_calculator.enc_dec_step(task, data_path={task: [params.eval_data]})
+    print(f"\nSimilarity matrix shape: {similarity_matrix.shape}")
     print("Similarity matrix:")
     print(similarity_matrix)
 

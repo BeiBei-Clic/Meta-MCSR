@@ -74,7 +74,7 @@ class SimilarityCalculator(object):
                     v.load_state_dict(weights)
                 logger.info(f"Loaded {k} from checkpoint")
 
-    def enc_dec_step(self, task):
+    def enc_dec_step(self, task, data_path=None):
         """
         Encoding step to compute similarity matrix.
         Returns the similarity matrix between encoded symbolic and numeric representations.
@@ -90,19 +90,58 @@ class SimilarityCalculator(object):
         encoder_f.eval()
 
         with torch.no_grad():
-            # get data batch
-            dataloader = self.env.create_train_iterator(task, None, self.params)
+            # For evaluation, create dataset directly with train=False
+            from snip.envs.environment import EnvDataset
+            dataset = EnvDataset(
+                self.env,
+                task,
+                train=False,  # Use False for evaluation
+                skip=False,
+                params=self.params,
+                path=data_path[task][0] if data_path else None,
+                type="eval",  # Set type to avoid NoneType error
+            )
+
+            # Create dataloader
+            dataloader = torch.utils.data.DataLoader(
+                dataset,
+                batch_size=self.params.batch_size_eval if hasattr(self.params, 'batch_size_eval') else self.params.batch_size,
+                shuffle=False,
+                collate_fn=dataset.collate_fn,
+            )
+
             samples, errors = next(iter(dataloader))
+
+            # Display raw data before processing
+            print(f"\nRaw sample information:")
+            print(f"- Keys in samples: {list(samples.keys())}")
+            if 'infos' in samples:
+                print(f"- Sample infos: {samples['infos']}")
+            if 'tree' in samples:
+                print(f"- Tree structure: {samples['tree'][:1]}")
+            if 'tree_encoded' in samples:
+                print(f"- Tree encoded sample: {samples['tree_encoded'][:1]}")
 
             x_to_fit = samples["x_to_fit"]
             y_to_fit = samples["y_to_fit"]
 
+            # Display data loading information
+            print(f"\nData loading details:")
+            print(f"- Number of samples: {len(x_to_fit)}")
+            print(f"- First sample x shape: {x_to_fit[0].shape}")
+            print(f"- First sample y shape: {y_to_fit[0].shape}")
+            print(f"- First sample x[:2]: {x_to_fit[0][:2]}")
+            print(f"- First sample y[:2]: {y_to_fit[0][:2]}")
+
             # prepare input for embedder
             x1 = []
+            print(f"\nPreparing embedder input:")
             for seq_id in range(len(x_to_fit)):
                 x1.append([])
+                print(f"  Sample {seq_id}: x_to_fit shape = {x_to_fit[seq_id].shape}, y_to_fit shape = {y_to_fit[seq_id].shape}")
                 for seq_l in range(len(x_to_fit[seq_id])):
                     x1[seq_id].append([x_to_fit[seq_id][seq_l], y_to_fit[seq_id][seq_l]])
+                print(f"    After processing: x1[{seq_id}] length = {len(x1[seq_id])}, each element shape = {len(x1[seq_id][0])}")
 
             # embed the sequences
             x1, len1 = embedder(x1)

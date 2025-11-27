@@ -101,7 +101,7 @@ def build_modules(env, params):
     # reload pretrained modules
     if params.reload_model != "":
         logger.info(f"Reloading modules from {params.reload_model} ...")
-        reloaded = torch.load(params.reload_model)
+        reloaded = torch.load(params.reload_model, weights_only=False)
         modules_to_load = ['embedder', 'encoder_y','encoder_f'] #SNIP modules
         if params.is_proppred:
             modules_to_load = ['encoder_f'] #symbolic encoder (encoder_f) for numeric properties

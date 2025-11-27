@@ -1,6 +1,7 @@
 # Model outputs and data
 weights/
 dump/
+eval_output/
 
 # Python cache and build
 __pycache__/

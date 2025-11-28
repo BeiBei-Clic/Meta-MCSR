@@ -350,24 +350,41 @@ def create_fitness_and_individual(pset):
 def setup_toolbox(pset, Individual):
     """设置工具箱"""
     toolbox = base.Toolbox()
-    
-    # 注册表达式生成器 - 初始化深度设置
-    toolbox.register("expr", gp.genHalfAndHalf, pset=pset, min_=2, max_=6)
+
+    # 注册表达式生成器 - 更严格的深度控制
+    # 使用更小的深度值来避免过度复杂的表达式
+    toolbox.register("expr", gp.genHalfAndHalf, pset=pset, min_=1, max_=2)  # 降低最大深度
     toolbox.register("individual", tools.initIterate, Individual, toolbox.expr)
     toolbox.register("population", tools.initRepeat, list, toolbox.individual)
     toolbox.register("compile", gp.compile, pset=pset)
 
-    # 为变异操作注册专门的子树生成器 - 变异时子树应该比初始子树小一些，但不能太小
-    toolbox.register("expr_mut", gp.genHalfAndHalf, pset=pset, min_=1, max_=5)
-    
+    # 为变异操作注册专门的子树生成器 - 变异时使用更小的子树
+    toolbox.register("expr_mut", gp.genHalfAndHalf, pset=pset, min_=1, max_=2)  # 同样限制变异深度
+
     return toolbox
 
 def evaluate_individual_with_similarity(individual, toolbox, X_train, y_train, similarity_calculator):
     """使用相似度计算器评估个体的适应度"""
+    # 首先检查树的复杂度
+    tree_height = individual.height
+    tree_size = len(individual)
+
+    # 严格的复杂度惩罚：过高的树给予极高惩罚
+    if tree_height > 6 or tree_size > 25:
+        return (1e6,)
+
+    # 中等复杂度惩罚：对较大但可接受的树给予适度惩罚
+    complexity_penalty = 0.0
+    if tree_height > 4:
+        complexity_penalty += (tree_height - 4) * 0.1
+    if tree_size > 15:
+        complexity_penalty += (tree_size - 15) * 0.01
+
     tree_str = tree_to_prefix_string(individual)
     tokens = tree_str.split(',')
 
-    if len(tokens) > 10:
+    # 更严格的token限制
+    if len(tokens) > 50:  # 大幅减少token限制
         return (1e6,)
 
     data_dict = create_snip_compatible_data(X_train, y_train, tree_str)
@@ -382,7 +399,10 @@ def evaluate_individual_with_similarity(individual, toolbox, X_train, y_train, s
 
     os.remove(temp_file)
     avg_similarity = similarity_matrix.mean().item()
-    return (1.0 - avg_similarity,)
+
+    # 结合相似度和复杂度惩罚
+    fitness = (1.0 - avg_similarity) + complexity_penalty
+    return (fitness,)
 
 def run_genetic_programming(dataset_name, sample_size=1000, population_size=300, generations=100, random_seed=42):
     """运行遗传编程算法"""
@@ -403,14 +423,19 @@ def run_genetic_programming(dataset_name, sample_size=1000, population_size=300,
     toolbox.register("evaluate", evaluate_individual_with_similarity, toolbox=toolbox,
                     X_train=X_train, y_train=y_train, similarity_calculator=similarity_calculator)
 
+    # 使用标准锦标赛选择，但通过适应度函数中的复杂度惩罚来控制树大小
     toolbox.register("select", tools.selTournament, tournsize=5)
     toolbox.register("mate", gp.cxOnePoint)
     toolbox.register("mutate", gp.mutUniform, expr=toolbox.expr_mut, pset=pset)
 
-    # 设置合理的深度限制
-    MAX_TREE_HEIGHT = 8
+    # 设置更严格的深度和大小限制
+    MAX_TREE_HEIGHT = 4  # 减少最大深度
+    MAX_TREE_SIZE = 10   # 限制树的最大节点数
+
     toolbox.decorate("mate", gp.staticLimit(key=operator.attrgetter("height"), max_value=MAX_TREE_HEIGHT))
     toolbox.decorate("mutate", gp.staticLimit(key=operator.attrgetter("height"), max_value=MAX_TREE_HEIGHT))
+    toolbox.decorate("mate", gp.staticLimit(key=len, max_value=MAX_TREE_SIZE))
+    toolbox.decorate("mutate", gp.staticLimit(key=len, max_value=MAX_TREE_SIZE))
 
     population = toolbox.population(n=population_size)
     hof = tools.HallOfFame(1)

@@ -257,101 +257,61 @@ def setup_similarity_calculator():
     return SimilarityCalculator(modules, env, params)
 
 def div(left, right):
-    """保护除法，避免除零错误"""
-    if abs(right) < 1e-6:
-        return 1.0
-    result = left / right
-    return result if not (math.isnan(result) or math.isinf(result)) else 1.0
+    return left / right if abs(right) >= 1e-6 else 1.0
 
 def sqrt(x):
-    """保护平方根，避免负数开方"""
-    result = math.sqrt(abs(x))
-    return result if not (math.isnan(result) or math.isinf(result)) else 1.0
+    return math.sqrt(max(abs(x), 0))
 
 def log(x):
-    """保护对数，避免负数或零的对数"""
-    result = math.log(abs(x) + 1e-6)
-    return result if not (math.isnan(result) or math.isinf(result)) else 0.0
+    return math.log(max(abs(x), 1e-6))
 
 def exp(x):
-    """保护指数，避免溢出"""
-    x = max(min(x, 50), -50)
-    result = math.exp(x)
-    return result if not (math.isnan(result) or math.isinf(result)) else 1.0
+    return math.exp(max(min(x, 50), -50))
 
 def pow(left, right):
-    """保护幂运算"""
     if abs(left) < 1e-6 and right < 0:
         return 1.0
-    right = max(min(right, 10), -10)
-    result = abs(left) ** right
-    return result if not (math.isnan(result) or math.isinf(result)) else 1.0
+    return max(abs(left), 1e-6) ** max(min(right, 10), -10)
 
 def sin(x):
-    """保护正弦函数"""
-    result = math.sin(x)
-    return result if not (math.isnan(result) or math.isinf(result)) else 0.0
+    return math.sin(x)
 
 def cos(x):
-    """保护余弦函数"""
-    result = math.cos(x)
-    return result if not (math.isnan(result) or math.isinf(result)) else 1.0
+    return math.cos(x)
 
 def inv(x):
-    """保护倒数函数，避免除零错误"""
-    if abs(x) < 1e-6:
-        return 1.0
-    result = 1.0 / x
-    return result if not (math.isnan(result) or math.isinf(result)) else 1.0
+    return 1.0 / x if abs(x) >= 1e-6 else 1.0
 
 def load_and_preprocess_data(dataset_name, sample_size=1000):
     """加载并预处理数据"""
     print(f"正在加载数据集: {dataset_name}")
-    
-    # 构建数据文件路径
+
     data_path = f'dump/dataset/{dataset_name}'
-    
-    # 读取指定数量的数据
     data = []
     with open(data_path, 'r') as f:
         for i, line in enumerate(f):
             if i >= sample_size:
                 break
             values = line.strip().split()
-            if len(values) >= 2:  # 至少需要2列数据
+            if len(values) >= 2:
                 data.append([float(v) for v in values])
-    
+
     data = np.array(data)
-    
-    # 检查数据维度
-    if data.ndim == 1:
-        raise ValueError(f"数据集 {dataset_name} 格式错误：只有一行数据")
+    print(f"数据形状: {data.shape}")
 
-    num_cols = data.shape[1]
-    print(f"数据形状: {data.shape}, 列数: {num_cols}")
+    X = data[:, :-1]
+    y = data[:, -1]
 
-    X = data[:, :-1]  # 前面的列作为输入特征
-    y = data[:, -1]  # 最后一列作为目标值
-    
-    print(f"处理后数据形状: X={X.shape}, y={y.shape}")
-    
-    # 按8:2比例分割训练测试集
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.2, random_state=42
-    )
-    
-    # 数据标准化
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+
     scaler_X = StandardScaler()
     scaler_y = StandardScaler()
-    
+
     X_train_scaled = scaler_X.fit_transform(X_train)
     X_test_scaled = scaler_X.transform(X_test)
     y_train_scaled = scaler_y.fit_transform(y_train.reshape(-1, 1)).flatten()
     y_test_scaled = scaler_y.transform(y_test.reshape(-1, 1)).flatten()
-    
-    print(f"训练集大小: {X_train_scaled.shape[0]}")
-    print(f"测试集大小: {X_test_scaled.shape[0]}")
-    
+
     return X_train_scaled, X_test_scaled, y_train_scaled, y_test_scaled, scaler_X, scaler_y
 
 def setup_gp(num_inputs=2):
@@ -383,10 +343,8 @@ def create_fitness_and_individual(pset):
     """创建适应度和个体类型"""
     if not hasattr(creator, "FitnessMin"):
         creator.create("FitnessMin", base.Fitness, weights=(-1.0,))
-
     if not hasattr(creator, "Individual"):
         creator.create("Individual", gp.PrimitiveTree, fitness=creator.FitnessMin)
-
     return creator.Individual
 
 def setup_toolbox(pset, Individual):
@@ -403,18 +361,13 @@ def setup_toolbox(pset, Individual):
 
 def evaluate_individual_with_similarity(individual, toolbox, X_train, y_train, similarity_calculator):
     """使用相似度计算器评估个体的适应度"""
-    # 将树转换为前序遍历字符串
     tree_str = tree_to_prefix_string(individual)
-
-    if not tree_str or len(tree_str.strip()) == 0:
-        raise ValueError("Generated tree string is empty")
-
     tokens = tree_str.split(',')
+
     if len(tokens) > 150:
         return (1e6,)
 
     data_dict = create_snip_compatible_data(X_train, y_train, tree_str)
-
     temp_file = "/tmp/temp_gp_data.json"
     with open(temp_file, 'w') as f:
         json.dump(data_dict, f)
@@ -425,10 +378,8 @@ def evaluate_individual_with_similarity(individual, toolbox, X_train, y_train, s
     )
 
     os.remove(temp_file)
-
     avg_similarity = similarity_matrix.mean().item()
-    fitness = 1.0 - avg_similarity
-    return fitness,
+    return (1.0 - avg_similarity,)
 
 def run_genetic_programming(dataset_name, sample_size=1000, population_size=300, generations=100, random_seed=42):
     """运行遗传编程算法"""
@@ -479,14 +430,7 @@ def run_genetic_programming(dataset_name, sample_size=1000, population_size=300,
     print(f"\n最佳个体: {best_individual}")
     print(f"最佳适应度 (训练RMSE): {best_individual.fitness.values[0]:.6f}")
     
-    test_predictions = []
-    for i in range(len(X_test)):
-        pred = best_func(*X_test[i])
-        if math.isnan(pred) or math.isinf(pred):
-            pred = 0.0
-        test_predictions.append(pred)
-
-    test_predictions = np.array(test_predictions)
+    test_predictions = np.array([best_func(*X_test[i]) if not math.isnan(best_func(*X_test[i])) else 0.0 for i in range(len(X_test))])
     test_rmse = np.sqrt(mean_squared_error(y_test, test_predictions))
     
     print(f"测试集RMSE: {test_rmse:.6f}")
@@ -537,24 +481,20 @@ def run_multiple_experiments(dataset_name, sample_size=1000, population_size=200
 def save_results(results, dataset_name):
     """保存实验结果到文件"""
     os.makedirs('results', exist_ok=True)
-    
-    # 保存详细结果
+
     filename = f'results/stGP_{dataset_name}.json'
+    results_copy = results.copy()
+
+    for i, result in enumerate(results_copy['all_results']):
+        if 'logbook' in result:
+            results_copy['all_results'][i]['logbook'] = {
+                'best_fitness': [record['min'] for record in result['logbook']]
+            }
+
     with open(filename, 'w', encoding='utf-8') as f:
-        # 处理logbook对象，转换为可序列化的格式
-        results_copy = results.copy()
-        for i, result in enumerate(results_copy['all_results']):
-            if 'logbook' in result:
-                logbook = result['logbook']
-                # 只保存每一代的最佳适应度（最小值），不再保存generations字段
-                results_copy['all_results'][i]['logbook'] = {
-                    'best_fitness': [record['min'] for record in logbook]
-                }
-        
         json.dump(results_copy, f, indent=2, ensure_ascii=False)
-    
+
     print(f"结果已保存到: {filename}")
-    print(f"已保存全部 {len(results['all_results'])} 次实验的每代最佳适应度变化过程，不包含generations字段")
 
 def main(sample_size=1000, population_size=200, generations=300):
     """主函数，运行所有数据集的实验"""

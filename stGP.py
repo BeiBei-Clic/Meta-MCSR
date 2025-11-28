@@ -29,27 +29,36 @@ _individual_created = False
 _similarity_calculator = None
 
 def tree_to_prefix_string(tree):
-    """将DEAP的树结构转换为前序遍历字符串"""
+    """将DEAP的树结构转换为前序遍历字符串，适配SNIP格式"""
+    tokens = []
+
     def traverse(node):
         if isinstance(node, gp.Primitive):
             # 操作符节点
-            args = [traverse(child) for child in node.args]
-            if len(args) == 1:
-                return f"{node.name},{args[0]}"
-            else:
-                return f"{node.name}," + ",".join(args)
+            tokens.append(node.name)
+            # 递归遍历子节点
+            for child in node.args:
+                traverse(child)
         elif isinstance(node, gp.Terminal):
             # 终端节点（变量或常数）
             if isinstance(node.value, str):
                 # 变量
-                return node.value
+                tokens.append(node.value)
             else:
                 # 常数
-                return str(node.value)
-        else:
-            return str(node)
+                tokens.append(str(node.value))
+        elif hasattr(node, '__iter__') and not isinstance(node, str):
+            # 如果是可迭代对象（如PrimitiveTree的元素）
+            for element in node:
+                traverse(element)
 
-    return traverse(tree)
+    traverse(tree)
+
+    # 验证生成的前序表达式是否语法正确
+    # 这里应该有基本的括号匹配或操作符/操作数数量检查
+    # 但根据用户要求，移除防御性编程
+
+    return ",".join(tokens)
 
 def tree_to_prefix_tokens(tree):
     """将DEAP的树结构转换为前序遍历token列表"""
@@ -74,9 +83,9 @@ def tree_to_prefix_tokens(tree):
 
 
 def create_snip_compatible_data(X_data, y_data, tree_str):
-    """创建与SNIP兼容的数据格式，完全按照test_data的格式"""
+    """创建与SNIP兼容的数据格式，按照用户提供的格式"""
 
-    # 简化统计（与test_data格式一致）
+    # 统计操作符数量
     tree_tokens = tree_str.split(',')
     n_unary_ops = str(tree_tokens.count('sqrt') + tree_tokens.count('log') +
                          tree_tokens.count('sin') + tree_tokens.count('cos') +
@@ -85,7 +94,7 @@ def create_snip_compatible_data(X_data, y_data, tree_str):
                           tree_tokens.count('mul') + tree_tokens.count('div') +
                           tree_tokens.count('pow'))
 
-    # 创建正确的数据格式：x_to_fit是二维数组，每行是一个数据点
+    # 创建x_to_fit：二维数组，每行是一个数据点
     x_to_fit = []
     for i in range(len(X_data)):
         row = []
@@ -93,19 +102,18 @@ def create_snip_compatible_data(X_data, y_data, tree_str):
             row.append(f"{X_data[i, j]:.6e}")
         x_to_fit.append(row)
 
-    # y_to_fit也是二维数组，每行是一个目标值
+    # 创建y_to_fit：二维数组，每行是一个目标值
     y_to_fit = [[f"{y:.6e}"] for y in y_data]
 
-    # 生成skeleton_tree_encoded（基于tree_str生成）
+    # 生成skeleton_tree_encoded
     skeleton_tree_encoded = []
     for token in tree_str.split(','):
         if token in ['add', 'sub', 'mul', 'div', 'pow', 'pow2', 'pow3', 'sin', 'cos', 'log', 'sqrt', 'neg', 'inv']:
             skeleton_tree_encoded.append(token)
         else:
-            # 常数或变量替换为CONSTANT
             skeleton_tree_encoded.append("CONSTANT")
 
-    # 创建完整的JSON数据格式，完全按照test_data的格式
+    # 按照用户提供的格式创建JSON数据
     data = {
         "n_input_points": str(len(X_data)),
         "n_unary_ops": n_unary_ops,
@@ -281,7 +289,7 @@ def setup_similarity_calculator():
     print("相似度计算器初始化成功")
     return _similarity_calculator
 
-def protected_div(left, right):
+def div(left, right):
     """保护除法，避免除零错误"""
     if abs(right) < 1e-6:
         return 1.0
@@ -290,21 +298,21 @@ def protected_div(left, right):
         return 1.0
     return result
 
-def protected_sqrt(x):
+def sqrt(x):
     """保护平方根，避免负数开方"""
     result = math.sqrt(abs(x))
     if math.isnan(result) or math.isinf(result):
         return 1.0
     return result
 
-def protected_log(x):
+def log(x):
     """保护对数，避免负数或零的对数"""
     result = math.log(abs(x) + 1e-6)
     if math.isnan(result) or math.isinf(result):
         return 0.0
     return result
 
-def protected_exp(x):
+def exp(x):
     """保护指数，避免溢出"""
     x = max(min(x, 50), -50)  # 更严格的限制
     result = math.exp(x)
@@ -312,7 +320,7 @@ def protected_exp(x):
         return 1.0
     return result
 
-def protected_pow(left, right):
+def pow(left, right):
     """保护幂运算"""
     if abs(left) < 1e-6 and right < 0:
         return 1.0
@@ -323,16 +331,25 @@ def protected_pow(left, right):
         return 1.0
     return result
 
-def protected_sin(x):
+def sin(x):
     """保护正弦函数"""
     result = math.sin(x)
     if math.isnan(result) or math.isinf(result):
         return 0.0
     return result
 
-def protected_cos(x):
+def cos(x):
     """保护余弦函数"""
     result = math.cos(x)
+    if math.isnan(result) or math.isinf(result):
+        return 1.0
+    return result
+
+def inv(x):
+    """保护倒数函数，避免除零错误"""
+    if abs(x) < 1e-6:
+        return 1.0
+    result = 1.0 / x
     if math.isnan(result) or math.isinf(result):
         return 1.0
     return result
@@ -392,26 +409,28 @@ def setup_gp(num_inputs=2):
     # 创建原语集
     pset = gp.PrimitiveSet("MAIN", num_inputs)  # 动态设置输入变量数量
     
-    # 添加基本运算符
-    pset.addPrimitive(operator.add, 2)
-    pset.addPrimitive(operator.sub, 2)
-    pset.addPrimitive(operator.mul, 2)
-    pset.addPrimitive(protected_div, 2)
-    pset.addPrimitive(protected_pow, 2)
-    pset.addPrimitive(protected_sqrt, 1)
-    pset.addPrimitive(protected_log, 1)
-    pset.addPrimitive(protected_exp, 1)
-    pset.addPrimitive(operator.neg, 1)
-    pset.addPrimitive(protected_sin, 1)
-    pset.addPrimitive(protected_cos, 1)
+    # 添加基本运算符，确保操作符名称与SNIP匹配
+    pset.addPrimitive(operator.add, 2, name="add")
+    pset.addPrimitive(operator.sub, 2, name="sub")
+    pset.addPrimitive(operator.mul, 2, name="mul")
+    pset.addPrimitive(div, 2, name="div")
+    pset.addPrimitive(pow, 2, name="pow")
+    pset.addPrimitive(sqrt, 1, name="sqrt")
+    pset.addPrimitive(log, 1, name="log")
+    pset.addPrimitive(exp, 1, name="exp")
+    pset.addPrimitive(sin, 1, name="sin")
+    pset.addPrimitive(cos, 1, name="cos")
+
+    # 添加SNIP支持的其他操作符
+    pset.addPrimitive(inv, 1, name="inv")  # inv函数
     
     # 使用functools.partial替代lambda来避免警告
     pset.addEphemeralConstant("rand101", functools.partial(random.uniform, -2, 2))
     
-    # 重命名参数
+    # 重命名参数，使用SNIP期望的格式 x_0, x_1, x_2...
     arg_mapping = {}
     for i in range(num_inputs):
-        arg_mapping[f'ARG{i}'] = f'x{i+1}'
+        arg_mapping[f'ARG{i}'] = f'x_{i}'
     pset.renameArguments(**arg_mapping)
     
     return pset
@@ -447,23 +466,10 @@ def evaluate_individual_with_similarity(individual, toolbox, X_train, y_train, s
     """使用相似度计算器评估个体的适应度"""
     # 将树转换为前序遍历字符串
     tree_str = tree_to_prefix_string(individual)
-    print(f"生成的树字符串: {tree_str}")
 
-    # 验证生成的树字符串是否有效
-    if not tree_str or tree_str.strip() == "":
-        # 如果树字符串为空，返回一个很大的适应度值（坏的结果）
-        print(f"警告：生成的树字符串为空！")
-        return (1e6,)
-
-    # 确保树字符串包含有效的操作符
-    valid_ops = ['add', 'sub', 'mul', 'div', 'pow', 'pow2', 'pow3', 'sin', 'cos', 'log', 'sqrt', 'neg', 'inv']
-    tokens = tree_str.split(',')
-    has_valid_op = any(token in valid_ops for token in tokens if token.strip())
-
-    if not has_valid_op:
-        # 如果没有有效的操作符，返回一个很大的适应度值（坏的结果）
-        # print(f"警告：生成的树字符串没有有效的操作符！")
-        return (1e6,)
+    # 验证树字符串是否为有效格式
+    if not tree_str or len(tree_str.strip()) == 0:
+        raise ValueError("Generated tree string is empty")
 
     # 创建兼容的数据格式
     data_dict = create_snip_compatible_data(X_train, y_train, tree_str)
@@ -485,11 +491,10 @@ def evaluate_individual_with_similarity(individual, toolbox, X_train, y_train, s
 
     # 从相似度矩阵中提取适应度值
     # 相似度越高，适应度越好（注意适应度是最小化的）
-    if similarity_matrix is not None and similarity_matrix.numel() > 0:
-        # 取平均相似度，转换为距离（1 - similarity）作为适应度
-        avg_similarity = similarity_matrix.mean().item()
-        fitness = 1.0 - max(0.0, min(1.0, avg_similarity))  # 确保在[0,1]范围内
-        return fitness,
+    # 取平均相似度，转换为距离（1 - similarity）作为适应度
+    avg_similarity = similarity_matrix.mean().item()
+    fitness = 1.0 - max(0.0, min(1.0, avg_similarity))  # 确保在[0,1]范围内
+    return fitness,
 
 def run_genetic_programming(dataset_name, sample_size=1000, population_size=300, generations=100, random_seed=42):
     """运行遗传编程算法"""

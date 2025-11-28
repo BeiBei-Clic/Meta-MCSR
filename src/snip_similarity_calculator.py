@@ -95,10 +95,10 @@ class SimilarityCalculator(object):
             x_to_fit = samples["x_to_fit"]
             y_to_fit = samples["y_to_fit"]
 
-            print(f"- 第一个样本 x[:2]: {x_to_fit[0][:2]}")
-            print(f"- 第一个样本 y[:2]: {y_to_fit[0][:2]}")
-            print(f"- 最后样本 x[:2]: {x_to_fit[-1][:2]}")
-            print(f"- 最后样本 y[:2]: {y_to_fit[-1][:2]}")
+            # print(f"- 第一个样本 x[:2]: {x_to_fit[0][:2]}")
+            # print(f"- 第一个样本 y[:2]: {y_to_fit[0][:2]}")
+            # print(f"- 最后样本 x[:2]: {x_to_fit[-1][:2]}")
+            # print(f"- 最后样本 y[:2]: {y_to_fit[-1][:2]}")
 
             # 准备嵌入器输入
             x1 = []

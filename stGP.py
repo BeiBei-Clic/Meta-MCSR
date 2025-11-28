@@ -63,7 +63,9 @@ def create_snip_compatible_data(X_data, y_data, tree_str):
     """创建与SNIP兼容的数据格式，按照用户提供的格式"""
 
     # 统计操作符数量
+    # print(tree_str)
     tree_tokens = tree_str.split(',')
+    # print(tree_tokens)
     n_unary_ops = str(tree_tokens.count('sqrt') + tree_tokens.count('log') +
                          tree_tokens.count('sin') + tree_tokens.count('cos') +
                          tree_tokens.count('neg') + tree_tokens.count('inv'))
@@ -88,7 +90,11 @@ def create_snip_compatible_data(X_data, y_data, tree_str):
         if token in ['add', 'sub', 'mul', 'div', 'pow', 'pow2', 'pow3', 'sin', 'cos', 'log', 'sqrt', 'neg', 'inv']:
             skeleton_tree_encoded.append(token)
         else:
-            skeleton_tree_encoded.append("CONSTANT")
+            # 对于变量名（x_0, x_1等）保持原名，对于常数标记为CONSTANT
+            if token.startswith('x_') and token[2:].isdigit():
+                skeleton_tree_encoded.append(token)
+            else:
+                skeleton_tree_encoded.append("CONSTANT")
 
     # 按照用户提供的格式创建JSON数据
     data = {

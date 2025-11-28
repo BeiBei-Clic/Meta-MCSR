@@ -474,7 +474,7 @@ def evaluate_individual_with_similarity(individual, toolbox, X_train, y_train, s
     # 相似度越高，适应度越好（注意适应度是最小化的）
     # 取平均相似度，转换为距离（1 - similarity）作为适应度
     avg_similarity = similarity_matrix.mean().item()
-    fitness = 1.0 - max(0.0, min(1.0, avg_similarity))  # 确保在[0,1]范围内
+    fitness = 1.0 - avg_similarity  # 直接转换，不进行裁切
     return fitness,
 
 def run_genetic_programming(dataset_name, sample_size=1000, population_size=300, generations=100, random_seed=42):

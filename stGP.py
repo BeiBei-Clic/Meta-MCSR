@@ -26,7 +26,6 @@ np.random.seed(42)
 # 全局变量，避免重复创建类
 _fitness_created = False
 _individual_created = False
-_similarity_calculator = None
 
 def tree_to_prefix_string(tree):
     """将DEAP的树结构转换为前序遍历字符串，适配SNIP格式"""
@@ -131,10 +130,6 @@ def create_snip_compatible_data(X_data, y_data, tree_str):
 
 def setup_similarity_calculator():
     """设置相似度计算器"""
-    global _similarity_calculator
-
-    if _similarity_calculator is not None:
-        return _similarity_calculator
 
     # 创建基本参数，与命令行参数保持一致
     class SimpleParams:

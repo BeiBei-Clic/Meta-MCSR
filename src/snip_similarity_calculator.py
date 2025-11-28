@@ -102,7 +102,7 @@ class SimilarityCalculator(object):
 
             # 准备嵌入器输入
             x1 = []
-            print(f"\n准备嵌入器输入:")
+            # print(f"\n准备嵌入器输入:")
             for seq_id in range(len(x_to_fit)):
                 x1.append([])
                 for seq_l in range(len(x_to_fit[seq_id])):

@@ -2,6 +2,7 @@
 weights/
 dump/
 eval_output/
+results
 
 # Python cache and build
 __pycache__/

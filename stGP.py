@@ -72,19 +72,9 @@ def tree_to_prefix_tokens(tree):
     traverse(tree)
     return tokens
 
-class SimpleTree:
-    """简单树类，模拟SNIP需要的树结构"""
-    def __init__(self, prefix_str):
-        self.prefix_str = prefix_str
-        self._prefix_tokens = prefix_str.split(',')
-
-    def prefix(self):
-        return self.prefix_str
 
 def create_snip_compatible_data(X_data, y_data, tree_str):
-    """创建与SNIP兼容的数据格式"""
-    # 创建简单树对象
-    tree_obj = SimpleTree(tree_str)
+    """创建与SNIP兼容的数据格式，完全按照test_data的格式"""
 
     # 简化统计（与test_data格式一致）
     tree_tokens = tree_str.split(',')
@@ -106,7 +96,16 @@ def create_snip_compatible_data(X_data, y_data, tree_str):
     # y_to_fit也是二维数组，每行是一个目标值
     y_to_fit = [[f"{y:.6e}"] for y in y_data]
 
-    # 创建简化的数据格式，类似于dump/test_data/data.prefix的格式
+    # 生成skeleton_tree_encoded（基于tree_str生成）
+    skeleton_tree_encoded = []
+    for token in tree_str.split(','):
+        if token in ['add', 'sub', 'mul', 'div', 'pow', 'pow2', 'pow3', 'sin', 'cos', 'log', 'sqrt', 'neg', 'inv']:
+            skeleton_tree_encoded.append(token)
+        else:
+            # 常数或变量替换为CONSTANT
+            skeleton_tree_encoded.append("CONSTANT")
+
+    # 创建完整的JSON数据格式，完全按照test_data的格式
     data = {
         "n_input_points": str(len(X_data)),
         "n_unary_ops": n_unary_ops,
@@ -117,7 +116,8 @@ def create_snip_compatible_data(X_data, y_data, tree_str):
         "n_centroids": "1",
         "x_to_fit": x_to_fit,
         "y_to_fit": y_to_fit,
-        "tree": tree_str  # 使用字符串而不是树对象
+        "tree": tree_str,
+        "skeleton_tree_encoded": skeleton_tree_encoded
     }
     return data
 
@@ -359,11 +359,11 @@ def load_and_preprocess_data(dataset_name, sample_size=1000):
     # 检查数据维度
     if data.ndim == 1:
         raise ValueError(f"数据集 {dataset_name} 格式错误：只有一行数据")
-    
+
     num_cols = data.shape[1]
     print(f"数据形状: {data.shape}, 列数: {num_cols}")
-    
-    X = data[:, :-2]  # 前两列作为输入特征
+
+    X = data[:, :-1]  # 前面的列作为输入特征
     y = data[:, -1]  # 最后一列作为目标值
     
     print(f"处理后数据形状: X={X.shape}, y={y.shape}")
@@ -387,10 +387,10 @@ def load_and_preprocess_data(dataset_name, sample_size=1000):
     
     return X_train_scaled, X_test_scaled, y_train_scaled, y_test_scaled, scaler_X, scaler_y
 
-def setup_gp():
+def setup_gp(num_inputs=2):
     """设置遗传编程环境"""
     # 创建原语集
-    pset = gp.PrimitiveSet("MAIN", 2)  # 2个输入变量
+    pset = gp.PrimitiveSet("MAIN", num_inputs)  # 动态设置输入变量数量
     
     # 添加基本运算符
     pset.addPrimitive(operator.add, 2)
@@ -409,7 +409,10 @@ def setup_gp():
     pset.addEphemeralConstant("rand101", functools.partial(random.uniform, -2, 2))
     
     # 重命名参数
-    pset.renameArguments(ARG0='x1', ARG1='x2')
+    arg_mapping = {}
+    for i in range(num_inputs):
+        arg_mapping[f'ARG{i}'] = f'x{i+1}'
+    pset.renameArguments(**arg_mapping)
     
     return pset
 
@@ -444,6 +447,23 @@ def evaluate_individual_with_similarity(individual, toolbox, X_train, y_train, s
     """使用相似度计算器评估个体的适应度"""
     # 将树转换为前序遍历字符串
     tree_str = tree_to_prefix_string(individual)
+    print(f"生成的树字符串: {tree_str}")
+
+    # 验证生成的树字符串是否有效
+    if not tree_str or tree_str.strip() == "":
+        # 如果树字符串为空，返回一个很大的适应度值（坏的结果）
+        print(f"警告：生成的树字符串为空！")
+        return (1e6,)
+
+    # 确保树字符串包含有效的操作符
+    valid_ops = ['add', 'sub', 'mul', 'div', 'pow', 'pow2', 'pow3', 'sin', 'cos', 'log', 'sqrt', 'neg', 'inv']
+    tokens = tree_str.split(',')
+    has_valid_op = any(token in valid_ops for token in tokens if token.strip())
+
+    if not has_valid_op:
+        # 如果没有有效的操作符，返回一个很大的适应度值（坏的结果）
+        # print(f"警告：生成的树字符串没有有效的操作符！")
+        return (1e6,)
 
     # 创建兼容的数据格式
     data_dict = create_snip_compatible_data(X_train, y_train, tree_str)
@@ -483,7 +503,8 @@ def run_genetic_programming(dataset_name, sample_size=1000, population_size=300,
     X_train, X_test, y_train, y_test, scaler_X, scaler_y = load_and_preprocess_data(dataset_name, sample_size)
     
     # 设置遗传编程
-    pset = setup_gp()
+    input_dim = X_train.shape[1]  # 获取输入特征维度
+    pset = setup_gp(input_dim)
     Individual = create_fitness_and_individual(pset)
     toolbox = setup_toolbox(pset, Individual)
 
@@ -539,7 +560,8 @@ def run_genetic_programming(dataset_name, sample_size=1000, population_size=300,
     # 在测试集上评估
     test_predictions = []
     for i in range(len(X_test)):
-        pred = best_func(X_test[i, 0], X_test[i, 1])
+        # 将X_test[i]的所有特征作为参数传递给best_func
+        pred = best_func(*X_test[i])
         if math.isnan(pred) or math.isinf(pred):
             pred = 0.0
         test_predictions.append(pred)

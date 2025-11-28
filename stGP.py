@@ -59,28 +59,6 @@ def tree_to_prefix_string(tree):
 
     return ",".join(tokens)
 
-def tree_to_prefix_tokens(tree):
-    """将DEAP的树结构转换为前序遍历token列表"""
-    tokens = []
-    def traverse(node):
-        if isinstance(node, gp.Primitive):
-            # 操作符节点
-            tokens.append(node.name)
-            for child in node.args:
-                traverse(child)
-        elif isinstance(node, gp.Terminal):
-            # 终端节点（变量或常数）
-            if isinstance(node.value, str):
-                # 变量
-                tokens.append(node.value)
-            else:
-                # 常数
-                tokens.append(str(node.value))
-
-    traverse(tree)
-    return tokens
-
-
 def create_snip_compatible_data(X_data, y_data, tree_str):
     """创建与SNIP兼容的数据格式，按照用户提供的格式"""
 
@@ -465,6 +443,14 @@ def evaluate_individual_with_similarity(individual, toolbox, X_train, y_train, s
     # 验证树字符串是否为有效格式
     if not tree_str or len(tree_str.strip()) == 0:
         raise ValueError("Generated tree string is empty")
+
+    # 检查树表达式的长度以避免tensor尺寸不匹配
+    # SNIP的batch_equations函数默认max_len=200，需要为开始和结束符号预留空间
+    tokens = tree_str.split(',')
+    max_tokens_allowed = 150  # 保守限制，为开始/结束符号和缓冲预留空间
+    if len(tokens) > max_tokens_allowed:
+        # 如果表达式太长，返回一个大的适应度值（表示差的解）
+        return (1e6,)  # 最小化问题，大值表示差的适应度
 
     # 创建兼容的数据格式
     data_dict = create_snip_compatible_data(X_train, y_train, tree_str)

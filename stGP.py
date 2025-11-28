@@ -23,9 +23,6 @@ from snip.envs import build_env
 random.seed(42)
 np.random.seed(42)
 
-# 全局变量，避免重复创建类
-_fitness_created = False
-_individual_created = False
 
 def tree_to_prefix_string(tree):
     """将DEAP的树结构转换为前序遍历字符串，适配SNIP格式"""
@@ -53,19 +50,13 @@ def tree_to_prefix_string(tree):
 
     traverse(tree)
 
-    # 验证生成的前序表达式是否语法正确
-    # 这里应该有基本的括号匹配或操作符/操作数数量检查
-    # 但根据用户要求，移除防御性编程
-
+  
     return ",".join(tokens)
 
 def create_snip_compatible_data(X_data, y_data, tree_str):
     """创建与SNIP兼容的数据格式，按照用户提供的格式"""
 
-    # 统计操作符数量
-    # print(tree_str)
     tree_tokens = tree_str.split(',')
-    # print(tree_tokens)
     n_unary_ops = str(tree_tokens.count('sqrt') + tree_tokens.count('log') +
                          tree_tokens.count('sin') + tree_tokens.count('cos') +
                          tree_tokens.count('neg') + tree_tokens.count('inv'))
@@ -261,77 +252,57 @@ def setup_similarity_calculator():
     # 检查必需的参数
     check_model_params(params)
 
-    # 创建环境和模块
     env = build_env(params)
     modules = build_modules(env, params)
-    _similarity_calculator = SimilarityCalculator(modules, env, params)
-    print("相似度计算器初始化成功")
-    return _similarity_calculator
+    return SimilarityCalculator(modules, env, params)
 
 def div(left, right):
     """保护除法，避免除零错误"""
     if abs(right) < 1e-6:
         return 1.0
     result = left / right
-    if math.isnan(result) or math.isinf(result):
-        return 1.0
-    return result
+    return result if not (math.isnan(result) or math.isinf(result)) else 1.0
 
 def sqrt(x):
     """保护平方根，避免负数开方"""
     result = math.sqrt(abs(x))
-    if math.isnan(result) or math.isinf(result):
-        return 1.0
-    return result
+    return result if not (math.isnan(result) or math.isinf(result)) else 1.0
 
 def log(x):
     """保护对数，避免负数或零的对数"""
     result = math.log(abs(x) + 1e-6)
-    if math.isnan(result) or math.isinf(result):
-        return 0.0
-    return result
+    return result if not (math.isnan(result) or math.isinf(result)) else 0.0
 
 def exp(x):
     """保护指数，避免溢出"""
-    x = max(min(x, 50), -50)  # 更严格的限制
+    x = max(min(x, 50), -50)
     result = math.exp(x)
-    if math.isnan(result) or math.isinf(result):
-        return 1.0
-    return result
+    return result if not (math.isnan(result) or math.isinf(result)) else 1.0
 
 def pow(left, right):
     """保护幂运算"""
     if abs(left) < 1e-6 and right < 0:
         return 1.0
-    if abs(right) > 10:  # 限制指数大小
-        right = 10 if right > 0 else -10
+    right = max(min(right, 10), -10)
     result = abs(left) ** right
-    if math.isnan(result) or math.isinf(result):
-        return 1.0
-    return result
+    return result if not (math.isnan(result) or math.isinf(result)) else 1.0
 
 def sin(x):
     """保护正弦函数"""
     result = math.sin(x)
-    if math.isnan(result) or math.isinf(result):
-        return 0.0
-    return result
+    return result if not (math.isnan(result) or math.isinf(result)) else 0.0
 
 def cos(x):
     """保护余弦函数"""
     result = math.cos(x)
-    if math.isnan(result) or math.isinf(result):
-        return 1.0
-    return result
+    return result if not (math.isnan(result) or math.isinf(result)) else 1.0
 
 def inv(x):
     """保护倒数函数，避免除零错误"""
     if abs(x) < 1e-6:
         return 1.0
     result = 1.0 / x
-    if math.isnan(result) or math.isinf(result):
-        return 1.0
-    return result
+    return result if not (math.isnan(result) or math.isinf(result)) else 1.0
 
 def load_and_preprocess_data(dataset_name, sample_size=1000):
     """加载并预处理数据"""
@@ -400,33 +371,22 @@ def setup_gp(num_inputs=2):
     pset.addPrimitive(sin, 1, name="sin")
     pset.addPrimitive(cos, 1, name="cos")
 
-    # 添加SNIP支持的其他操作符
-    pset.addPrimitive(inv, 1, name="inv")  # inv函数
-    
-    # 使用functools.partial替代lambda来避免警告
+    pset.addPrimitive(inv, 1, name="inv")
     pset.addEphemeralConstant("rand101", functools.partial(random.uniform, -2, 2))
-    
-    # 重命名参数，使用SNIP期望的格式 x_0, x_1, x_2...
-    arg_mapping = {}
-    for i in range(num_inputs):
-        arg_mapping[f'ARG{i}'] = f'x_{i}'
+
+    arg_mapping = {f'ARG{i}': f'x_{i}' for i in range(num_inputs)}
     pset.renameArguments(**arg_mapping)
     
     return pset
 
 def create_fitness_and_individual(pset):
     """创建适应度和个体类型"""
-    global _fitness_created, _individual_created
-    
-    # 只在第一次调用时创建类，避免重复创建警告
-    if not _fitness_created:
+    if not hasattr(creator, "FitnessMin"):
         creator.create("FitnessMin", base.Fitness, weights=(-1.0,))
-        _fitness_created = True
-    
-    if not _individual_created:
+
+    if not hasattr(creator, "Individual"):
         creator.create("Individual", gp.PrimitiveTree, fitness=creator.FitnessMin)
-        _individual_created = True
-    
+
     return creator.Individual
 
 def setup_toolbox(pset, Individual):
@@ -446,118 +406,86 @@ def evaluate_individual_with_similarity(individual, toolbox, X_train, y_train, s
     # 将树转换为前序遍历字符串
     tree_str = tree_to_prefix_string(individual)
 
-    # 验证树字符串是否为有效格式
     if not tree_str or len(tree_str.strip()) == 0:
         raise ValueError("Generated tree string is empty")
 
-    # 检查树表达式的长度以避免tensor尺寸不匹配
-    # SNIP的batch_equations函数默认max_len=200，需要为开始和结束符号预留空间
     tokens = tree_str.split(',')
-    max_tokens_allowed = 150  # 保守限制，为开始/结束符号和缓冲预留空间
-    if len(tokens) > max_tokens_allowed:
-        # 如果表达式太长，返回一个大的适应度值（表示差的解）
-        return (1e6,)  # 最小化问题，大值表示差的适应度
+    if len(tokens) > 150:
+        return (1e6,)
 
-    # 创建兼容的数据格式
     data_dict = create_snip_compatible_data(X_train, y_train, tree_str)
 
-    # 创建临时数据文件
     temp_file = "/tmp/temp_gp_data.json"
-    import json
     with open(temp_file, 'w') as f:
         json.dump(data_dict, f)
 
-    # 使用相似度计算器
     similarity_matrix = similarity_calculator.enc_dec_step(
         "functions",
         data_path={"functions": [temp_file]}
     )
 
-    # 清理临时文件
     os.remove(temp_file)
 
-    # 从相似度矩阵中提取适应度值
-    # 相似度越高，适应度越好（注意适应度是最小化的）
-    # 取平均相似度，转换为距离（1 - similarity）作为适应度
     avg_similarity = similarity_matrix.mean().item()
-    fitness = 1.0 - avg_similarity  # 直接转换，不进行裁切
+    fitness = 1.0 - avg_similarity
     return fitness,
 
 def run_genetic_programming(dataset_name, sample_size=1000, population_size=300, generations=100, random_seed=42):
     """运行遗传编程算法"""
     print(f"开始遗传编程算法... 数据集: {dataset_name}, 随机种子: {random_seed}")
     
-    # 设置随机种子
     random.seed(random_seed)
     np.random.seed(random_seed)
-    
-    # 加载和预处理数据
+
     X_train, X_test, y_train, y_test, scaler_X, scaler_y = load_and_preprocess_data(dataset_name, sample_size)
-    
-    # 设置遗传编程
-    input_dim = X_train.shape[1]  # 获取输入特征维度
+
+    input_dim = X_train.shape[1]
     pset = setup_gp(input_dim)
     Individual = create_fitness_and_individual(pset)
     toolbox = setup_toolbox(pset, Individual)
 
-    # 初始化相似度计算器
     similarity_calculator = setup_similarity_calculator()
 
-    # 注册评估函数
     toolbox.register("evaluate", evaluate_individual_with_similarity, toolbox=toolbox,
                     X_train=X_train, y_train=y_train, similarity_calculator=similarity_calculator)
-    
-    # 注册遗传算子
+
     toolbox.register("select", tools.selTournament, tournsize=3)
     toolbox.register("mate", gp.cxOnePoint)
     toolbox.register("mutate", gp.mutUniform, expr=toolbox.expr, pset=pset)
-    
-    # 限制树的深度
+
     toolbox.decorate("mate", gp.staticLimit(key=operator.attrgetter("height"), max_value=5))
     toolbox.decorate("mutate", gp.staticLimit(key=operator.attrgetter("height"), max_value=5))
-    
-    # 创建初始种群
+
     population = toolbox.population(n=population_size)
-    
-    # 创建名人堂保存最佳个体
     hof = tools.HallOfFame(1)
-    
-    # 设置统计信息
+
     stats = tools.Statistics(lambda ind: ind.fitness.values)
     stats.register("avg", np.mean)
     stats.register("std", np.std)
     stats.register("min", np.min)
     stats.register("max", np.max)
-    
+
     print("开始进化...")
-    
-    # 运行遗传算法
+
     population, logbook = algorithms.eaSimple(
-        population, toolbox, 
-        cxpb=0.5,      # 交叉概率
-        mutpb=0.2,     # 变异概率
-        ngen=generations,       # 进化代数
-        stats=stats,
-        halloffame=hof,
-        verbose=True
+        population, toolbox,
+        cxpb=0.5, mutpb=0.2, ngen=generations,
+        stats=stats, halloffame=hof, verbose=True
     )
-    
-    # 获取最佳个体
+
     best_individual = hof[0]
     best_func = toolbox.compile(expr=best_individual)
     
     print(f"\n最佳个体: {best_individual}")
     print(f"最佳适应度 (训练RMSE): {best_individual.fitness.values[0]:.6f}")
     
-    # 在测试集上评估
     test_predictions = []
     for i in range(len(X_test)):
-        # 将X_test[i]的所有特征作为参数传递给best_func
         pred = best_func(*X_test[i])
         if math.isnan(pred) or math.isinf(pred):
             pred = 0.0
         test_predictions.append(pred)
-    
+
     test_predictions = np.array(test_predictions)
     test_rmse = np.sqrt(mean_squared_error(y_test, test_predictions))
     

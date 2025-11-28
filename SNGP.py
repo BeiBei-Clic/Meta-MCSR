@@ -351,11 +351,14 @@ def setup_toolbox(pset, Individual):
     """设置工具箱"""
     toolbox = base.Toolbox()
     
-    # 注册表达式生成器
+    # 注册表达式生成器 - 初始化深度设置
     toolbox.register("expr", gp.genHalfAndHalf, pset=pset, min_=2, max_=6)
     toolbox.register("individual", tools.initIterate, Individual, toolbox.expr)
     toolbox.register("population", tools.initRepeat, list, toolbox.individual)
     toolbox.register("compile", gp.compile, pset=pset)
+
+    # 为变异操作注册专门的子树生成器 - 变异时子树应该比初始子树小一些，但不能太小
+    toolbox.register("expr_mut", gp.genHalfAndHalf, pset=pset, min_=1, max_=5)
     
     return toolbox
 
@@ -364,7 +367,7 @@ def evaluate_individual_with_similarity(individual, toolbox, X_train, y_train, s
     tree_str = tree_to_prefix_string(individual)
     tokens = tree_str.split(',')
 
-    if len(tokens) > 150:
+    if len(tokens) > 10:
         return (1e6,)
 
     data_dict = create_snip_compatible_data(X_train, y_train, tree_str)
@@ -400,12 +403,14 @@ def run_genetic_programming(dataset_name, sample_size=1000, population_size=300,
     toolbox.register("evaluate", evaluate_individual_with_similarity, toolbox=toolbox,
                     X_train=X_train, y_train=y_train, similarity_calculator=similarity_calculator)
 
-    toolbox.register("select", tools.selTournament, tournsize=3)
+    toolbox.register("select", tools.selTournament, tournsize=5)
     toolbox.register("mate", gp.cxOnePoint)
-    toolbox.register("mutate", gp.mutUniform, expr=toolbox.expr, pset=pset)
+    toolbox.register("mutate", gp.mutUniform, expr=toolbox.expr_mut, pset=pset)
 
-    toolbox.decorate("mate", gp.staticLimit(key=operator.attrgetter("height"), max_value=5))
-    toolbox.decorate("mutate", gp.staticLimit(key=operator.attrgetter("height"), max_value=5))
+    # 设置合理的深度限制
+    MAX_TREE_HEIGHT = 8
+    toolbox.decorate("mate", gp.staticLimit(key=operator.attrgetter("height"), max_value=MAX_TREE_HEIGHT))
+    toolbox.decorate("mutate", gp.staticLimit(key=operator.attrgetter("height"), max_value=MAX_TREE_HEIGHT))
 
     population = toolbox.population(n=population_size)
     hof = tools.HallOfFame(1)
